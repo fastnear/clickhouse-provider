@@ -16,7 +16,6 @@ use near_indexer::near_primitives::hash::CryptoHash;
 use near_indexer::near_primitives::types::BlockHeight;
 use std::convert::TryFrom;
 use std::time::Duration;
-use tokio_retry::{strategy::ExponentialBackoff, Retry};
 
 const MAX_TOKEN_LENGTH: usize = 64;
 const CLICKHOUSE_TARGET: &str = "clickhouse";
@@ -266,8 +265,10 @@ async fn insert_rows_with_retry<T>(
 where
     T: Row + Serialize,
 {
-    let strategy = ExponentialBackoff::from_millis(10).max_delay(Duration::from_secs(30));
-    let retry_future = Retry::spawn(strategy, || async {
+    let mut delay = Duration::from_millis(100);
+    let max_retries = 10;
+    let mut i = 0;
+    loop {
         let res = || async {
             let mut insert = client.insert(table)?;
             for row in rows {
@@ -276,15 +277,18 @@ where
             insert.end().await
         };
         match res().await {
-            Ok(_) => Ok(()),
+            Ok(v) => break Ok(v),
             Err(err) => {
-                tracing::log::error!(target: CLICKHOUSE_TARGET, "Error inserting rows into \"{}\": {}", table, err);
-                Err(err)
+                tracing::log::error!(target: CLICKHOUSE_TARGET, "Attempt #{}: Error inserting rows into \"{}\": {}", i, table, err);
+                tokio::time::sleep(delay).await;
+                delay *= 2;
+                if i == max_retries - 1 {
+                    break Err(err);
+                }
             }
-        }
-    });
-
-    retry_future.await
+        };
+        i += 1;
+    }
 }
 
 fn limit_length(s: &mut Option<String>) {
