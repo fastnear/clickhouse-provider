@@ -369,30 +369,32 @@ pub fn extract_rows(msg: BlockWithTxHashes) -> Rows {
                     gas_price,
                 } => {
                     for (log_index, log) in logs.into_iter().enumerate() {
-                        if log.starts_with(EVENT_LOG_PREFIX) {
-                            let log_index = u16::try_from(log_index).expect("Log index overflow");
-                            let event = parse_event(&log.as_str()[EVENT_LOG_PREFIX.len()..])
-                                .unwrap_or_default();
-                            rows.events.push(FullEventRow {
-                                block_height,
-                                block_hash: block_hash.clone(),
-                                block_timestamp,
-                                transaction_hash: tx_hash.clone(),
-                                receipt_id: receipt_id.clone(),
-                                receipt_index,
-                                log_index,
-                                signer_id: signer_id.to_string(),
-                                signer_public_key: signer_public_key.to_string(),
-                                predecessor_id: predecessor_id.clone(),
-                                account_id: account_id.clone(),
-                                status,
-                                log,
-
-                                version: event.version,
-                                standard: event.standard,
-                                event: event.event,
-                            });
+                        let log_index = u16::try_from(log_index).expect("Log index overflow");
+                        let event = if log.starts_with(EVENT_LOG_PREFIX) {
+                            parse_event(&log.as_str()[EVENT_LOG_PREFIX.len()..])
+                        } else {
+                            None
                         }
+                        .unwrap_or_default();
+                        rows.events.push(FullEventRow {
+                            block_height,
+                            block_hash: block_hash.clone(),
+                            block_timestamp,
+                            transaction_hash: tx_hash.clone(),
+                            receipt_id: receipt_id.clone(),
+                            receipt_index,
+                            log_index,
+                            signer_id: signer_id.to_string(),
+                            signer_public_key: signer_public_key.to_string(),
+                            predecessor_id: predecessor_id.clone(),
+                            account_id: account_id.clone(),
+                            status,
+                            log,
+
+                            version: event.version,
+                            standard: event.standard,
+                            event: event.event,
+                        });
                     }
 
                     for (action_index, action) in actions.into_iter().enumerate() {
