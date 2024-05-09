@@ -12,7 +12,7 @@ CREATE TABLE actions
     transaction_hash       String COMMENT 'Transaction hash',
     receipt_id             String COMMENT 'Receipt hash',
     receipt_index          UInt32 COMMENT 'Index of the receipt that appears in the block across all shards',
-    action_index           UInt8 COMMENT 'Index of the actions within the receipt',
+    action_index           UInt16 COMMENT 'Index of the actions within the receipt',
     signer_id              String COMMENT 'The account ID of the transaction signer',
     signer_public_key      String COMMENT 'The public key of the transaction signer',
     predecessor_id         String COMMENT 'The account ID of the receipt predecessor',
@@ -79,7 +79,7 @@ CREATE TABLE data
     predecessor_id  String COMMENT 'The account ID of the receipt predecessor',
     account_id      String COMMENT 'The account ID of where the receipt is executed',
     data_id         String COMMENT 'The Data ID',
-    data            String COMMENT 'The Data (either UTF8 string or base64:)',
+    data            Nullable(String) COMMENT 'The Data (either UTF8 string or base64:)',
 
     INDEX           block_timestamp_minmax_idx block_height TYPE minmax GRANULARITY 1,
     INDEX           account_id_bloom_index account_id TYPE bloom_filter() GRANULARITY 1,

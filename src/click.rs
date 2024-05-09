@@ -21,6 +21,7 @@ use tokio_retry::{strategy::ExponentialBackoff, Retry};
 const MAX_TOKEN_LENGTH: usize = 64;
 const CLICKHOUSE_TARGET: &str = "clickhouse";
 const EVENT_LOG_PREFIX: &str = "EVENT_JSON:";
+const SAVE_STEP: u64 = 1000;
 
 #[derive(Copy, Clone, Debug, Serialize_repr, Deserialize_repr, PartialEq)]
 #[repr(u8)]
@@ -128,6 +129,22 @@ pub struct ClickDB {
 }
 
 impl ClickDB {
+    pub(crate) fn min_restart_block(&self) -> BlockHeight {
+        let min_guaranteed_block = std::cmp::max(
+            self.last_action_block_height / SAVE_STEP * SAVE_STEP,
+            self.last_event_block_height / SAVE_STEP * SAVE_STEP,
+        )
+        .max(self.last_data_block_height / SAVE_STEP * SAVE_STEP);
+        let min_optimistic_block = std::cmp::min(
+            self.last_action_block_height,
+            self.last_event_block_height
+                .min(self.last_data_block_height),
+        );
+        min_guaranteed_block.max(min_optimistic_block)
+    }
+}
+
+impl ClickDB {
     pub fn new(min_batch: usize) -> Self {
         Self {
             client: establish_connection(),
@@ -137,12 +154,6 @@ impl ClickDB {
             last_data_block_height: 0,
             min_batch,
         }
-    }
-
-    pub fn get_min_block_height(&self) -> BlockHeight {
-        self.last_action_block_height
-            .min(self.last_event_block_height)
-            .min(self.last_data_block_height)
     }
 
     pub async fn fetch_last_block_heights(&mut self) {
@@ -231,7 +242,7 @@ pub async fn extract_info(db: &mut ClickDB, msg: BlockWithTxHashes) -> anyhow::R
     let rows = extract_rows(msg);
     db.merge(rows, block_height);
 
-    let is_round_block = block_height % 1000 == 0;
+    let is_round_block = block_height % SAVE_STEP == 0;
     if is_round_block {
         tracing::log::info!(target: CLICKHOUSE_TARGET, "#{}: Having {} actions, {} events, {} data", block_height, db.rows.actions.len(), db.rows.events.len(), db.rows.data.len());
     }
@@ -255,7 +266,7 @@ async fn insert_rows_with_retry<T>(
 where
     T: Row + Serialize,
 {
-    let strategy = ExponentialBackoff::from_millis(100).max_delay(Duration::from_secs(30));
+    let strategy = ExponentialBackoff::from_millis(10).max_delay(Duration::from_secs(30));
     let retry_future = Retry::spawn(strategy, || async {
         let res = || async {
             let mut insert = client.insert(table)?;
@@ -313,7 +324,7 @@ pub fn extract_rows(msg: BlockWithTxHashes) -> Rows {
                 receipt_id,
                 receipt,
             } = outcome.receipt;
-            let tx_hash = outcome.tx_hash.expect("Tx Hash is not given").to_string();
+            let tx_hash = outcome.tx_hash.expect("Tx Hash is not set").to_string();
             let predecessor_id = predecessor_id.to_string();
             let account_id = account_id.to_string();
             let receipt_id = receipt_id.to_string();

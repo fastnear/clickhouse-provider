@@ -27,12 +27,15 @@ async fn main() {
 
     tracing::log::info!(target: PROJECT_ID, "Starting Clickhouse Provider");
 
-    let mut db = ClickDB::new(1000);
+    let mut db = ClickDB::new(10000);
     db.verify_connection()
         .await
         .expect("Failed to connect to Clickhouse");
+
     db.fetch_last_block_heights().await;
-    let min_block_height = db.get_min_block_height();
+
+    let min_block_height = db.min_restart_block();
+
     tracing::log::info!(target: PROJECT_ID, "Min block height: {}", min_block_height);
 
     let client = reqwest::Client::new();
