@@ -32,12 +32,6 @@ async fn main() {
         .await
         .expect("Failed to connect to Clickhouse");
 
-    db.fetch_last_block_heights().await;
-
-    let min_block_height = db.min_restart_block();
-
-    tracing::log::info!(target: PROJECT_ID, "Min block height: {}", min_block_height);
-
     let client = reqwest::Client::new();
     let first_block_height = fetcher::fetch_first_block(&client)
         .await
@@ -48,18 +42,27 @@ async fn main() {
 
     tracing::log::info!(target: PROJECT_ID, "First block: {}", first_block_height);
 
+    let mut actions_data = ActionsData::new();
+    actions_data.fetch_last_block_heights(&mut db).await;
+    let min_block_height = actions_data.min_restart_block();
+    tracing::log::info!(target: PROJECT_ID, "Min block height: {}", min_block_height);
+
     let start_block_height = first_block_height.max(min_block_height + 1);
     let (sender, receiver) = mpsc::channel(100);
     tokio::spawn(fetcher::start_fetcher(client, start_block_height, sender));
-    listen_blocks(receiver, db).await;
+    listen_blocks_for_actions(receiver, db, actions_data).await;
     tracing::log::info!(target: PROJECT_ID, "Gracefully shut down");
 }
 
-async fn listen_blocks(mut stream: mpsc::Receiver<BlockWithTxHashes>, mut db: ClickDB) {
+async fn listen_blocks_for_actions(
+    mut stream: mpsc::Receiver<BlockWithTxHashes>,
+    mut db: ClickDB,
+    mut actions_data: ActionsData,
+) {
     while let Some(block) = stream.recv().await {
         tracing::log::info!(target: PROJECT_ID, "Processing block: {}", block.block.header.height);
-        extract_info(&mut db, block).await.unwrap();
+        actions_data.process_block(&mut db, block).await.unwrap();
     }
     tracing::log::info!(target: PROJECT_ID, "Committing the last batch");
-    db.commit().await.unwrap();
+    actions_data.commit(&mut db).await.unwrap();
 }

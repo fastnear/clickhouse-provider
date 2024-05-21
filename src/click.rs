@@ -111,6 +111,45 @@ pub struct FullDataRow {
     pub data: Option<String>,
 }
 
+#[derive(Row, Serialize)]
+pub struct TransactionRow {
+    pub transaction_hash: String,
+    pub signer_id: String,
+    pub tx_block_height: u64,
+    pub tx_block_hash: String,
+    pub tx_block_timestamp: u64,
+    pub transaction: String,
+    pub last_block_height: u64,
+}
+
+#[derive(Row, Serialize)]
+pub struct AccountTxRow {
+    pub account_id: String,
+    pub transaction_hash: String,
+    pub signer_id: String,
+    pub tx_block_height: u64,
+    pub tx_block_timestamp: u64,
+}
+
+#[derive(Row, Serialize)]
+pub struct BlockTxRow {
+    pub block_height: u64,
+    pub block_hash: String,
+    pub block_timestamp: u64,
+    pub transaction_hash: String,
+    pub signer_id: String,
+    pub tx_block_height: u64,
+}
+
+#[derive(Row, Serialize)]
+pub struct ReceiptTxRow {
+    pub receipt_id: String,
+    pub transaction_hash: String,
+    pub signer_id: String,
+    pub tx_block_height: u64,
+    pub tx_block_timestamp: u64,
+}
+
 #[derive(Default)]
 pub struct Rows {
     pub actions: Vec<FullActionRow>,
@@ -118,16 +157,28 @@ pub struct Rows {
     pub data: Vec<FullDataRow>,
 }
 
-pub struct ClickDB {
-    pub client: Client,
+pub struct ActionsData {
     pub rows: Rows,
     pub last_action_block_height: BlockHeight,
     pub last_event_block_height: BlockHeight,
     pub last_data_block_height: BlockHeight,
+}
+
+pub struct ClickDB {
+    pub client: Client,
     pub min_batch: usize,
 }
 
-impl ClickDB {
+impl ActionsData {
+    pub fn new() -> Self {
+        Self {
+            rows: Rows::default(),
+            last_action_block_height: 0,
+            last_event_block_height: 0,
+            last_data_block_height: 0,
+        }
+    }
+
     pub(crate) fn min_restart_block(&self) -> BlockHeight {
         let min_guaranteed_block = std::cmp::max(
             self.last_action_block_height / SAVE_STEP * SAVE_STEP,
@@ -141,24 +192,11 @@ impl ClickDB {
         );
         min_guaranteed_block.max(min_optimistic_block)
     }
-}
 
-impl ClickDB {
-    pub fn new(min_batch: usize) -> Self {
-        Self {
-            client: establish_connection(),
-            rows: Rows::default(),
-            last_action_block_height: 0,
-            last_event_block_height: 0,
-            last_data_block_height: 0,
-            min_batch,
-        }
-    }
-
-    pub async fn fetch_last_block_heights(&mut self) {
-        self.last_action_block_height = self.last_block_height("actions").await.unwrap_or(0);
-        self.last_event_block_height = self.last_block_height("events").await.unwrap_or(0);
-        self.last_data_block_height = self.last_block_height("data").await.unwrap_or(0);
+    pub async fn fetch_last_block_heights(&mut self, click_db: &mut ClickDB) {
+        self.last_action_block_height = click_db.max("block_height", "actions").await.unwrap_or(0);
+        self.last_event_block_height = click_db.max("block_height", "events").await.unwrap_or(0);
+        self.last_data_block_height = click_db.max("block_height", "data").await.unwrap_or(0);
         tracing::log::info!(target: CLICKHOUSE_TARGET, "Last block heights: actions={}, events={}, data={}", self.last_action_block_height, self.last_event_block_height, self.last_data_block_height);
     }
 
@@ -177,41 +215,78 @@ impl ClickDB {
         }
     }
 
-    pub async fn commit(&mut self) -> clickhouse::error::Result<()> {
-        self.commit_actions().await?;
-        self.commit_events().await?;
-        self.commit_data().await?;
+    pub async fn commit(&mut self, click_db: &mut ClickDB) -> clickhouse::error::Result<()> {
+        self.commit_actions(click_db).await?;
+        self.commit_events(click_db).await?;
+        self.commit_data(click_db).await?;
         Ok(())
     }
 
-    pub async fn commit_actions(&mut self) -> clickhouse::error::Result<()> {
+    pub async fn commit_actions(
+        &mut self,
+        click_db: &mut ClickDB,
+    ) -> clickhouse::error::Result<()> {
         if !self.rows.actions.is_empty() {
-            insert_rows_with_retry(&self.client, &self.rows.actions, "actions").await?;
+            insert_rows_with_retry(&click_db.client, &self.rows.actions, "actions").await?;
             self.rows.actions.clear();
         }
         Ok(())
     }
 
-    pub async fn commit_events(&mut self) -> clickhouse::error::Result<()> {
+    pub async fn commit_events(&mut self, click_db: &mut ClickDB) -> clickhouse::error::Result<()> {
         if !self.rows.events.is_empty() {
-            insert_rows_with_retry(&self.client, &self.rows.events, "events").await?;
+            insert_rows_with_retry(&click_db.client, &self.rows.events, "events").await?;
             self.rows.events.clear();
         }
         Ok(())
     }
 
-    pub async fn commit_data(&mut self) -> clickhouse::error::Result<()> {
+    pub async fn commit_data(&mut self, click_db: &mut ClickDB) -> clickhouse::error::Result<()> {
         if !self.rows.data.is_empty() {
-            insert_rows_with_retry(&self.client, &self.rows.data, "data").await?;
+            insert_rows_with_retry(&click_db.client, &self.rows.data, "data").await?;
             self.rows.data.clear();
         }
         Ok(())
     }
 
-    pub async fn last_block_height(&self, table: &str) -> clickhouse::error::Result<BlockHeight> {
+    pub async fn process_block(
+        &mut self,
+        db: &mut ClickDB,
+        block: BlockWithTxHashes,
+    ) -> anyhow::Result<()> {
+        let block_height = block.block.header.height;
+        let rows = extract_rows(block);
+        self.merge(rows, block_height);
+
+        let is_round_block = block_height % SAVE_STEP == 0;
+        if is_round_block {
+            tracing::log::info!(target: CLICKHOUSE_TARGET, "#{}: Having {} actions, {} events, {} data", block_height, self.rows.actions.len(), self.rows.events.len(), self.rows.data.len());
+        }
+        if self.rows.actions.len() >= db.min_batch || is_round_block {
+            self.commit_actions(db).await?;
+        }
+        if self.rows.events.len() >= db.min_batch || is_round_block {
+            self.commit_events(db).await?;
+        }
+        if self.rows.data.len() >= db.min_batch || is_round_block {
+            self.commit_data(db).await?;
+        }
+        Ok(())
+    }
+}
+
+impl ClickDB {
+    pub fn new(min_batch: usize) -> Self {
+        Self {
+            client: establish_connection(),
+            min_batch,
+        }
+    }
+
+    pub async fn max(&self, column: &str, table: &str) -> clickhouse::error::Result<BlockHeight> {
         let block_height = self
             .client
-            .query(&format!("SELECT max(block_height) FROM {}", table))
+            .query(&format!("SELECT max({}) FROM {}", column, table))
             .fetch_one::<u64>()
             .await?;
         Ok(block_height)
@@ -234,27 +309,6 @@ fn establish_connection() -> Client {
         .with_user(env::var("DATABASE_USER").unwrap())
         .with_password(env::var("DATABASE_PASSWORD").unwrap())
         .with_database(env::var("DATABASE_DATABASE").unwrap())
-}
-
-pub async fn extract_info(db: &mut ClickDB, msg: BlockWithTxHashes) -> anyhow::Result<()> {
-    let block_height = msg.block.header.height;
-    let rows = extract_rows(msg);
-    db.merge(rows, block_height);
-
-    let is_round_block = block_height % SAVE_STEP == 0;
-    if is_round_block {
-        tracing::log::info!(target: CLICKHOUSE_TARGET, "#{}: Having {} actions, {} events, {} data", block_height, db.rows.actions.len(), db.rows.events.len(), db.rows.data.len());
-    }
-    if db.rows.actions.len() >= db.min_batch || is_round_block {
-        db.commit_actions().await?;
-    }
-    if db.rows.events.len() >= db.min_batch || is_round_block {
-        db.commit_events().await?;
-    }
-    if db.rows.data.len() >= db.min_batch || is_round_block {
-        db.commit_data().await?;
-    }
-    Ok(())
 }
 
 async fn insert_rows_with_retry<T>(
