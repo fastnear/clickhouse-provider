@@ -30,3 +30,5 @@ reqwest = { version = "0.12.2", features = ["json"] }
 base64 = "0.21.5"
 
 ctrlc = "3.1.0"
+
+sled = "=1.0.0-alpha.121"

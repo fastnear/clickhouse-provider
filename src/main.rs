@@ -1,10 +1,14 @@
+mod actions;
 mod block_with_tx_hash;
 mod click;
 mod common;
 mod fetcher;
+mod transactions;
 
+use crate::actions::ActionsData;
 use crate::block_with_tx_hash::*;
 use crate::click::*;
+use crate::transactions::TransactionsData;
 use dotenv::dotenv;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
@@ -42,15 +46,41 @@ async fn main() {
 
     tracing::log::info!(target: PROJECT_ID, "First block: {}", first_block_height);
 
-    let mut actions_data = ActionsData::new();
-    actions_data.fetch_last_block_heights(&mut db).await;
-    let min_block_height = actions_data.min_restart_block();
-    tracing::log::info!(target: PROJECT_ID, "Min block height: {}", min_block_height);
+    let args: Vec<String> = std::env::args().collect();
+    let command = args
+        .get(1)
+        .map(|arg| arg.as_str())
+        .expect("You need to provide a command");
 
-    let start_block_height = first_block_height.max(min_block_height + 1);
-    let (sender, receiver) = mpsc::channel(100);
-    tokio::spawn(fetcher::start_fetcher(client, start_block_height, sender));
-    listen_blocks_for_actions(receiver, db, actions_data).await;
+    match command {
+        "actions" => {
+            let mut actions_data = ActionsData::new();
+            actions_data.fetch_last_block_heights(&mut db).await;
+            let min_block_height = actions_data.min_restart_block();
+            tracing::log::info!(target: PROJECT_ID, "Min block height: {}", min_block_height);
+
+            let start_block_height = first_block_height.max(min_block_height + 1);
+            let (sender, receiver) = mpsc::channel(100);
+            tokio::spawn(fetcher::start_fetcher(client, start_block_height, sender));
+            listen_blocks_for_actions(receiver, db, actions_data).await;
+        }
+        "transactions" => {
+            let mut transactions_data = TransactionsData::new();
+            // transactions_data.fetch_last_block_heights(&mut db).await;
+            // let min_block_height = transactions_data.min_restart_block();
+            // tracing::log::info!(target: PROJECT_ID, "Min block height: {}", min_block_height);
+
+            // let start_block_height = first_block_height.max(min_block_height + 1);
+            let start_block_height = 100000000; // first_block_height;
+            let (sender, receiver) = mpsc::channel(100);
+            tokio::spawn(fetcher::start_fetcher(client, start_block_height, sender));
+            listen_blocks_for_transactions(receiver, db, transactions_data).await;
+        }
+        _ => {
+            panic!("Unknown command");
+        }
+    };
+
     tracing::log::info!(target: PROJECT_ID, "Gracefully shut down");
 }
 
@@ -65,4 +95,20 @@ async fn listen_blocks_for_actions(
     }
     tracing::log::info!(target: PROJECT_ID, "Committing the last batch");
     actions_data.commit(&mut db).await.unwrap();
+}
+
+async fn listen_blocks_for_transactions(
+    mut stream: mpsc::Receiver<BlockWithTxHashes>,
+    mut db: ClickDB,
+    mut transactions_data: TransactionsData,
+) {
+    while let Some(block) = stream.recv().await {
+        tracing::log::info!(target: PROJECT_ID, "Processing block: {}", block.block.header.height);
+        transactions_data
+            .process_block(&mut db, block, true)
+            .await
+            .unwrap();
+    }
+    tracing::log::info!(target: PROJECT_ID, "Committing the last batch");
+    transactions_data.commit(&mut db).await.unwrap();
 }
