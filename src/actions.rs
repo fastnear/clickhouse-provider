@@ -15,7 +15,6 @@ use serde_repr::{Deserialize_repr, Serialize_repr};
 
 const MAX_TOKEN_LENGTH: usize = 64;
 const EVENT_LOG_PREFIX: &str = "EVENT_JSON:";
-const SAVE_STEP: u64 = 1000;
 
 #[derive(Copy, Clone, Debug, Serialize_repr, Deserialize_repr, PartialEq)]
 #[repr(u8)]

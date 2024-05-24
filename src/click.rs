@@ -7,6 +7,7 @@ use near_indexer::near_primitives::types::BlockHeight;
 use std::time::Duration;
 
 pub const CLICKHOUSE_TARGET: &str = "clickhouse";
+pub const SAVE_STEP: u64 = 1000;
 
 pub struct ClickDB {
     pub client: Client,

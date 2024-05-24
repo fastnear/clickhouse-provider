@@ -104,7 +104,7 @@ CREATE TABLE transactions
     tx_block_height    UInt64 COMMENT 'The block height when the transaction was included',
     tx_block_hash      String COMMENT 'The block hash when the transaction was included',
     tx_block_timestamp DateTime64(9, 'UTC') COMMENT 'The block timestamp in UTC when the transaction was included',
-    transaction        String COMMENT 'The JSON serialization of the full transaction view',
+    transaction        String COMMENT 'The JSON serialization of the transaction view without profiling and proofs',
     last_block_height  UInt64 COMMENT 'The block height when the last receipt was processed for the transaction',
 
     INDEX              signer_id_bloom_index signer_id TYPE bloom_filter() GRANULARITY 1,
@@ -135,7 +135,7 @@ CREATE TABLE block_txs
     block_timestamp  DateTime64(9, 'UTC') COMMENT 'The block timestamp in UTC',
     transaction_hash String COMMENT 'The transaction hash',
     signer_id        String COMMENT 'The account ID of the transaction signer',
-    tx_block_height  DateTime64(9, 'UTC') COMMENT 'The block height when the transaction was included',
+    tx_block_height  UInt64 COMMENT 'The block height when the transaction was included',
 
     INDEX            block_timestamp_minmax_idx block_timestamp TYPE minmax GRANULARITY 1,
 ) ENGINE = ReplacingMergeTree
@@ -155,4 +155,5 @@ CREATE TABLE receipt_txs
 ) ENGINE = ReplacingMergeTree
 PRIMARY KEY (tx_block_height)
 ORDER BY (tx_block_height, receipt_id)
+
 ```

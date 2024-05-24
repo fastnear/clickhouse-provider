@@ -130,6 +130,9 @@ pub async fn start_fetcher(
                                 break;
                             }
                         }
+                        if !RUNNING.load(Ordering::SeqCst) {
+                            break;
+                        }
                         if let Some(block) = block {
                             blocks_sink.send(block).await.expect("Failed to send block");
                         } else {
