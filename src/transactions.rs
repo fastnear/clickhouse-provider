@@ -1,5 +1,5 @@
 use crate::*;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::io::Write;
 use std::str::FromStr;
@@ -12,6 +12,7 @@ use near_indexer::near_primitives::views::{ActionView, ReceiptEnumView, SignedTr
 use near_indexer::near_primitives::{borsh, views};
 use near_indexer::{IndexerExecutionOutcomeWithReceipt, IndexerTransactionWithOutcome};
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -20,6 +21,11 @@ const NUM_TRANSACTIONS_KEY: &str = "num_transactions";
 const NUM_RECEIPTS_KEY: &str = "num_receipts";
 const NUM_DATA_RECEIPTS_KEY: &str = "num_data_receipts";
 const NUM_HEADERS_KEY: &str = "num_headers";
+
+const BLOCK_HEADERS_KEY: &str = "block_headers";
+const RECEIPT_TO_TX_KEY: &str = "receipt_to_tx";
+const DATA_RECEIPTS_KEY: &str = "data_receipts";
+const TRANSACTIONS_KEY: &str = "transactions";
 
 const EVENT_JSON_PREFIX: &str = "EVENT_JSON:";
 
@@ -177,10 +183,8 @@ impl TransactionsData {
 
         let skip_missing_receipts = block_height <= last_db_block_height;
 
-        self.tx_cache.insert_block_header(&block.block.header);
+        self.tx_cache.insert_block_header(block.block.header);
 
-        let mut used_receipt_ids = vec![];
-        let mut used_data_receipt_ids = vec![];
         let mut complete_transactions = vec![];
 
         let mut shards = block.shards;
@@ -206,18 +210,17 @@ impl TransactionsData {
                         },
                         pending_receipt_ids,
                     };
-                    self.tx_cache.insert_transaction(
-                        &pending_transaction,
-                        &pending_transaction.pending_receipt_ids,
-                    );
+                    let pending_receipt_ids = pending_transaction.pending_receipt_ids.clone();
+                    self.tx_cache
+                        .insert_transaction(pending_transaction, &pending_receipt_ids);
                 }
                 for receipt in chunk.receipts {
-                    match &receipt.receipt {
+                    match receipt.receipt {
                         ReceiptEnumView::Action { .. } => {
                             // skipping here, since we'll get one with execution
                         }
                         ReceiptEnumView::Data { data_id, .. } => {
-                            self.tx_cache.insert_data_receipt(&data_id, &receipt);
+                            self.tx_cache.insert_data_receipt(&data_id, receipt);
                         }
                     }
                 }
@@ -230,7 +233,7 @@ impl TransactionsData {
                 let mut execution_outcome = outcome.execution_outcome;
                 trim_execution_outcome(&mut execution_outcome);
                 let receipt_id = receipt.receipt_id;
-                let tx_hash = match self.tx_cache.get_receipt_to_tx(&receipt_id) {
+                let tx_hash = match self.tx_cache.get_and_remove_receipt_to_tx(&receipt_id) {
                     Some(tx_hash) => tx_hash,
                     None => {
                         if skip_missing_receipts {
@@ -240,10 +243,9 @@ impl TransactionsData {
                         panic!("Missing tx_hash for receipt_id");
                     }
                 };
-                used_receipt_ids.push(receipt_id);
                 let mut pending_transaction = self
                     .tx_cache
-                    .get_transaction(&tx_hash)
+                    .get_and_remove_transaction(&tx_hash)
                     .expect("Missing transaction for receipt");
                 pending_transaction
                     .pending_receipt_ids
@@ -257,7 +259,10 @@ impl TransactionsData {
                     ReceiptEnumView::Action { input_data_ids, .. } => {
                         let mut ok = true;
                         for data_id in input_data_ids {
-                            let data_receipt = match self.tx_cache.get_data_receipt(data_id) {
+                            let data_receipt = match self
+                                .tx_cache
+                                .get_and_remove_data_receipt(data_id)
+                            {
                                 Some(data_receipt) => data_receipt,
                                 None => {
                                     if skip_missing_receipts {
@@ -268,7 +273,6 @@ impl TransactionsData {
                                     panic!("Missing data receipt for data_id");
                                 }
                             };
-                            used_data_receipt_ids.push(*data_id);
 
                             pending_transaction
                                 .transaction
@@ -279,8 +283,6 @@ impl TransactionsData {
                             for receipt_id in &pending_transaction.pending_receipt_ids {
                                 self.tx_cache.remove_receipt_to_tx(receipt_id);
                             }
-                            self.tx_cache
-                                .remove_transaction(&pending_transaction.transaction_hash());
                             continue;
                         }
                     }
@@ -305,22 +307,9 @@ impl TransactionsData {
                     complete_transactions.push(pending_transaction);
                 } else {
                     self.tx_cache
-                        .insert_transaction(&pending_transaction, &pending_receipt_ids);
+                        .insert_transaction(pending_transaction, &pending_receipt_ids);
                 }
             }
-        }
-
-        for transaction in &complete_transactions {
-            self.tx_cache
-                .remove_transaction(&transaction.transaction_hash());
-        }
-
-        for receipt_id in &used_receipt_ids {
-            self.tx_cache.remove_receipt_to_tx(receipt_id);
-        }
-
-        for data_id in &used_data_receipt_ids {
-            self.tx_cache.remove_data_receipt(data_id);
         }
 
         if let Some(last_block_height) = self.tx_cache.get_u64(LAST_BLOCK_HEIGHT_KEY) {
@@ -360,7 +349,7 @@ impl TransactionsData {
             .to_string();
 
         for block_height in transaction.blocks {
-            let block_header = self.tx_cache.get_block_header(block_height);
+            let block_header = self.tx_cache.get_and_remove_block_header(block_height);
             if let Some(block_header) = block_header {
                 self.rows.block_txs.push(BlockTxRow {
                     block_height,
@@ -370,6 +359,7 @@ impl TransactionsData {
                     signer_id: signer_id.clone(),
                     tx_block_height: transaction.tx_block_height,
                 });
+                self.tx_cache.insert_block_header(block_header);
             } else {
                 tracing::log::warn!(target: PROJECT_ID, "Missing block header #{} for a transaction {}", block_height, tx_hash.clone());
                 // Append to a file a record about a missing
@@ -483,7 +473,7 @@ impl TransactionsData {
     }
 
     pub async fn last_block_height(&mut self, db: &mut ClickDB) -> BlockHeight {
-        let db_block = db.max("last_block_height", "block_txs").await.unwrap_or(0);
+        let db_block = db.max("block_height", "block_txs").await.unwrap_or(0);
         let cache_block = self.tx_cache.get_u64(LAST_BLOCK_HEIGHT_KEY).unwrap_or(0);
         db_block.max(cache_block)
     }
@@ -491,6 +481,10 @@ impl TransactionsData {
     pub fn is_cache_ready(&self, last_block_height: BlockHeight) -> bool {
         let cache_block = self.tx_cache.get_u64(LAST_BLOCK_HEIGHT_KEY).unwrap_or(0);
         cache_block == last_block_height
+    }
+
+    pub fn flush(&self) {
+        self.tx_cache.flush();
     }
 }
 
@@ -544,6 +538,12 @@ pub struct TxCache {
     pub num_receipts: u64,
     pub num_data_receipts: u64,
     pub num_headers: u64,
+
+    pub block_headers: HashMap<BlockHeight, views::BlockHeaderView>,
+    pub receipt_to_tx: HashMap<CryptoHash, CryptoHash>,
+    pub data_receipts: HashMap<CryptoHash, views::ReceiptView>,
+    pub transactions: HashMap<CryptoHash, PendingTransaction>,
+    pub last_block_height: BlockHeight,
 }
 
 impl TxCache {
@@ -554,19 +554,37 @@ impl TxCache {
             num_receipts: 0,
             num_data_receipts: 0,
             num_headers: 0,
+            block_headers: Default::default(),
+            receipt_to_tx: Default::default(),
+            data_receipts: Default::default(),
+            transactions: Default::default(),
+            last_block_height: 0,
         };
         this.num_transactions = this.get_u64(NUM_TRANSACTIONS_KEY).unwrap_or(0);
         this.num_receipts = this.get_u64(NUM_RECEIPTS_KEY).unwrap_or(0);
         this.num_data_receipts = this.get_u64(NUM_DATA_RECEIPTS_KEY).unwrap_or(0);
         this.num_headers = this.get_u64(NUM_HEADERS_KEY).unwrap_or(0);
+        this.last_block_height = this.get_u64(LAST_BLOCK_HEIGHT_KEY).unwrap_or(0);
+
+        this.block_headers = this.get_json(BLOCK_HEADERS_KEY).unwrap_or_default();
+        this.receipt_to_tx = this.get_json(RECEIPT_TO_TX_KEY).unwrap_or_default();
+        this.data_receipts = this.get_json(DATA_RECEIPTS_KEY).unwrap_or_default();
+        this.transactions = this.get_json(TRANSACTIONS_KEY).unwrap_or_default();
 
         this
     }
 
     pub fn stats(&self) -> String {
         format!(
-            "{} transactions, {} receipts, {} data receipts, {} headers",
-            self.num_transactions, self.num_receipts, self.num_data_receipts, self.num_headers
+            "sled: {} tx, {} r, {} dr, {} h ||| mem: {} tx, {} r, {} dr, {} h",
+            self.num_transactions,
+            self.num_receipts,
+            self.num_data_receipts,
+            self.num_headers,
+            self.transactions.len(),
+            self.receipt_to_tx.len(),
+            self.data_receipts.len(),
+            self.block_headers.len(),
         )
     }
 
@@ -578,170 +596,240 @@ impl TxCache {
     }
 
     pub fn flush(&self) {
+        self.set_json(BLOCK_HEADERS_KEY, &self.block_headers);
+        self.set_json(RECEIPT_TO_TX_KEY, &self.receipt_to_tx);
+        self.set_json(DATA_RECEIPTS_KEY, &self.data_receipts);
+        self.set_json(TRANSACTIONS_KEY, &self.transactions);
+
         self.sled_db.flush().expect("Failed to flush");
     }
 
-    pub fn insert_block_header(&mut self, block_header: &views::BlockHeaderView) -> bool {
-        let serialized = serde_json::to_vec(block_header).expect("Failed to serialize");
-        let old_header: Option<_> = self
-            .sled_db
-            .insert(
-                format!("header:{}", block_header.height),
-                serialized.clone(),
-            )
-            .expect("Failed to set data receipt");
-        if let Some(old_header) = old_header {
-            assert_eq!(
-                old_header, serialized,
-                "Header mismatch at {}!",
-                block_header.height
-            );
-            tracing::log::warn!(target: PROJECT_ID, "Duplicate header: {}", block_header.height);
-            false
-        } else {
-            self.num_headers += 1;
-            true
-        }
-    }
-
-    pub fn get_block_header(&self, block_height: BlockHeight) -> Option<views::BlockHeaderView> {
+    fn get_json<T>(&self, key: &str) -> Option<T>
+    where
+        T: DeserializeOwned,
+    {
         self.sled_db
-            .get(format!("header:{}", block_height))
-            .expect("Failed to get block header")
+            .get(key)
+            .expect("Failed to get")
             .map(|v| serde_json::from_slice(&v).expect("Failed to deserialize"))
     }
 
-    pub fn remove_block_header(&mut self, block_height: BlockHeight) -> bool {
-        let res = self
+    fn set_json<T>(&self, key: &str, value: T) -> bool
+    where
+        T: Serialize,
+    {
+        self.sled_db
+            .insert(key, serde_json::to_vec(&value).unwrap())
+            .expect("Failed to set")
+            .is_some()
+    }
+
+    pub fn insert_block_header(&mut self, block_header: views::BlockHeaderView) {
+        // In-memory insert.
+        let block_height = block_header.height;
+        let hash = block_header.hash;
+        let old_header = self.block_headers.insert(block_height, block_header);
+        if let Some(old_header) = old_header {
+            assert_eq!(
+                old_header.hash, hash,
+                "Header mismatch at {}!",
+                old_header.height
+            );
+            tracing::log::warn!(target: PROJECT_ID, "Duplicate header: {}", old_header.height);
+        } else {
+            // Not in memory checking sled state.
+            let old_header: Option<views::BlockHeaderView> = self
+                .sled_db
+                .remove(format!("header:{}", block_height))
+                .expect("Failed to get block header")
+                .map(|v| serde_json::from_slice(&v).expect("Failed to deserialize"));
+            if let Some(old_header) = old_header {
+                assert_eq!(
+                    old_header.hash, hash,
+                    "Header mismatch at {}!",
+                    old_header.height
+                );
+                tracing::log::warn!(target: PROJECT_ID, "Duplicate header: {}", old_header.height);
+                self.num_headers -= 1;
+            }
+        }
+    }
+
+    pub fn get_and_remove_block_header(
+        &mut self,
+        block_height: BlockHeight,
+    ) -> Option<views::BlockHeaderView> {
+        if let Some(block_header) = self.block_headers.remove(&block_height) {
+            Some(block_header)
+        } else {
+            let header: Option<views::BlockHeaderView> = self
+                .sled_db
+                .remove(format!("header:{}", block_height))
+                .expect("Failed to get block header")
+                .map(|v| serde_json::from_slice(&v).expect("Failed to deserialize"));
+            if header.is_some() {
+                self.num_headers -= 1;
+            }
+            header
+        }
+    }
+
+    pub fn remove_block_header(&mut self, block_height: BlockHeight) {
+        if self.block_headers.remove(&block_height).is_some() {
+            return;
+        }
+        if self
             .sled_db
             .remove(format!("header:{}", block_height))
             .expect("Failed to remove block header")
-            .is_some();
-        if res {
+            .is_some()
+        {
             self.num_headers -= 1;
         }
-        res
     }
 
-    pub fn get_receipt_to_tx(&self, receipt_id: &CryptoHash) -> Option<CryptoHash> {
-        self.sled_db
-            .get(receipt_id)
-            .expect("Failed to get")
-            .map(into_crypto_hash)
+    pub fn get_and_remove_receipt_to_tx(&mut self, receipt_id: &CryptoHash) -> Option<CryptoHash> {
+        if let Some(tx_hash) = self.receipt_to_tx.remove(receipt_id) {
+            return Some(tx_hash);
+        } else {
+            let tx_hash = self
+                .sled_db
+                .get(receipt_id)
+                .expect("Failed to get")
+                .map(into_crypto_hash);
+            if tx_hash.is_some() {
+                self.num_receipts -= 1;
+            }
+            tx_hash
+        }
     }
 
-    pub fn store_receipt_to_tx(&mut self, receipt_id: &CryptoHash, tx_hash: &CryptoHash) -> bool {
-        let old_tx_hash = self
-            .sled_db
-            .insert(receipt_id, tx_hash.0.to_vec())
-            .expect("Failed to insert")
-            .map(into_crypto_hash);
-
+    pub fn insert_receipt_to_tx(&mut self, receipt_id: &CryptoHash, tx_hash: CryptoHash) {
+        // In-memory insert.
+        let old_tx_hash = self.receipt_to_tx.insert(*receipt_id, tx_hash);
         if let Some(old_tx_hash) = old_tx_hash {
             assert_eq!(
-                &old_tx_hash, tx_hash,
+                old_tx_hash, tx_hash,
                 "Duplicate receipt_id: {} with different TX HASHES!",
                 receipt_id
             );
             tracing::log::warn!(target: PROJECT_ID, "Duplicate receipt_id: {} old_tx_hash: {} new_tx_hash: {}", receipt_id, old_tx_hash, tx_hash);
-            false
         } else {
-            self.num_receipts += 1;
-            true
+            // Not in memory checking sled state.
+            let old_tx_hash = self
+                .sled_db
+                .insert(receipt_id, tx_hash.0.to_vec())
+                .expect("Failed to insert")
+                .map(into_crypto_hash);
+            if let Some(old_tx_hash) = old_tx_hash {
+                assert_eq!(
+                    &old_tx_hash, &tx_hash,
+                    "Duplicate receipt_id: {} with different TX HASHES!",
+                    receipt_id
+                );
+                tracing::log::warn!(target: PROJECT_ID, "Duplicate receipt_id: {} old_tx_hash: {} new_tx_hash: {}", receipt_id, old_tx_hash, tx_hash);
+                self.num_receipts -= 1;
+            }
         }
     }
 
-    fn remove_receipt_to_tx(&mut self, receipt_id: &CryptoHash) -> bool {
-        let res = self
+    fn remove_receipt_to_tx(&mut self, receipt_id: &CryptoHash) {
+        if self.receipt_to_tx.remove(receipt_id).is_some() {
+            return;
+        }
+        if self
             .sled_db
             .remove(receipt_id)
             .expect("Failed to remove receipt_id")
-            .is_some();
-        if res {
+            .is_some()
+        {
             self.num_receipts -= 1;
         }
-        res
     }
 
-    fn insert_data_receipt(&mut self, data_id: &CryptoHash, receipt: &views::ReceiptView) -> bool {
-        let serialized = serde_json::to_vec(receipt).expect("Failed to serialize");
-        let old_receipt: Option<_> = self
-            .sled_db
-            .insert(data_id, serialized.clone())
-            .expect("Failed to set data receipt");
+    fn insert_data_receipt(&mut self, data_id: &CryptoHash, receipt: views::ReceiptView) {
+        let receipt_id = receipt.receipt_id;
+        let old_receipt = self.data_receipts.insert(*data_id, receipt);
+        // In-memory insert.
         if let Some(old_receipt) = old_receipt {
             assert_eq!(
-                old_receipt, serialized,
-                "Duplicate data_id: {} with different receipt!",
+                old_receipt.receipt_id, receipt_id,
+                "Duplicate data_id: {} with different receipt_id!",
                 data_id
             );
             tracing::log::warn!(target: PROJECT_ID, "Duplicate data_id: {}", data_id);
-            false
         } else {
-            self.num_data_receipts += 1;
-            true
+            // Not in memory checking sled state.
+            let old_receipt: Option<views::ReceiptView> = self
+                .sled_db
+                .remove(data_id)
+                .expect("Failed to get data receipt")
+                .map(|v| serde_json::from_slice(&v).expect("Failed to deserialize"));
+            if let Some(old_receipt) = old_receipt {
+                assert_eq!(
+                    old_receipt.receipt_id, receipt_id,
+                    "Duplicate data_id: {} with different receipt_id!",
+                    data_id
+                );
+                tracing::log::warn!(target: PROJECT_ID, "Duplicate data_id: {}", data_id);
+                self.num_data_receipts -= 1;
+            }
         }
     }
 
-    fn get_data_receipt(&self, data_id: &CryptoHash) -> Option<views::ReceiptView> {
-        self.sled_db
-            .get(data_id)
-            .expect("Failed to get data receipt")
-            .map(|v| serde_json::from_slice(&v).expect("Failed to deserialize"))
-    }
-
-    fn remove_data_receipt(&mut self, data_id: &CryptoHash) -> bool {
-        let res = self
-            .sled_db
-            .remove(data_id)
-            .expect("Failed to remove data receipt")
-            .is_some();
-        if res {
-            self.num_data_receipts -= 1;
+    fn get_and_remove_data_receipt(&mut self, data_id: &CryptoHash) -> Option<views::ReceiptView> {
+        if let Some(receipt) = self.data_receipts.remove(data_id) {
+            Some(receipt)
+        } else {
+            let receipt: Option<views::ReceiptView> = self
+                .sled_db
+                .remove(data_id)
+                .expect("Failed to get data receipt")
+                .map(|v| serde_json::from_slice(&v).expect("Failed to deserialize"));
+            if receipt.is_some() {
+                self.num_data_receipts -= 1;
+            }
+            receipt
         }
-        res
     }
 
     fn insert_transaction(
         &mut self,
-        pending_transaction: &PendingTransaction,
+        pending_transaction: PendingTransaction,
         pending_receipt_ids: &[CryptoHash],
-    ) -> bool {
+    ) {
         let tx_hash = pending_transaction.transaction_hash();
         for receipt_id in pending_receipt_ids {
-            self.store_receipt_to_tx(receipt_id, &tx_hash);
+            self.insert_receipt_to_tx(receipt_id, tx_hash);
         }
-        let res = self
-            .sled_db
-            .insert(
-                &tx_hash,
-                serde_json::to_vec(pending_transaction).expect("Failed to serialize"),
-            )
-            .expect("Failed to set transaction")
-            .is_some();
-        if !res {
-            self.num_transactions += 1;
+
+        let old_transaction = self.transactions.insert(tx_hash, pending_transaction);
+        if old_transaction.is_none() {
+            if self
+                .sled_db
+                .remove(&tx_hash)
+                .expect("Failed to remove transaction")
+                .is_some()
+            {
+                self.num_transactions -= 1;
+            }
         }
-        res
     }
 
-    fn get_transaction(&self, tx_hash: &CryptoHash) -> Option<PendingTransaction> {
-        self.sled_db
-            .get(tx_hash)
-            .expect("Failed to get transaction")
-            .map(|v| serde_json::from_slice(&v).expect("Failed to deserialize"))
-    }
-
-    fn remove_transaction(&mut self, tx_hash: &CryptoHash) -> bool {
-        let res = self
-            .sled_db
-            .remove(tx_hash)
-            .expect("Failed to remove transaction")
-            .is_some();
-        if res {
-            self.num_transactions -= 1;
+    fn get_and_remove_transaction(&mut self, tx_hash: &CryptoHash) -> Option<PendingTransaction> {
+        if let Some(transaction) = self.transactions.remove(tx_hash) {
+            Some(transaction)
+        } else {
+            let transaction: Option<PendingTransaction> = self
+                .sled_db
+                .remove(tx_hash)
+                .expect("Failed to get transaction")
+                .map(|v| serde_json::from_slice(&v).expect("Failed to deserialize"));
+            if transaction.is_some() {
+                self.num_transactions -= 1;
+            }
+            transaction
         }
-        res
     }
 
     pub fn get_u64(&self, key: &str) -> Option<u64> {

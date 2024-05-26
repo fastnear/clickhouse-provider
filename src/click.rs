@@ -58,11 +58,14 @@ where
     let mut i = 0;
     loop {
         let res = || async {
-            let mut insert = client.insert(table)?;
-            for row in rows {
-                insert.write(row).await?;
+            if env::var("CLICKHOUSE_SKIP_COMMIT") != Ok("true".to_string()) {
+                let mut insert = client.insert(table)?;
+                for row in rows {
+                    insert.write(row).await?;
+                }
+                insert.end().await?;
             }
-            insert.end().await
+            Ok(())
         };
         match res().await {
             Ok(v) => break Ok(v),

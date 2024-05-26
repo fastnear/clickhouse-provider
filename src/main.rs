@@ -121,5 +121,5 @@ async fn listen_blocks_for_transactions(
     }
     tracing::log::info!(target: PROJECT_ID, "Committing the last batch");
     transactions_data.commit(&mut db).await.unwrap();
-    transactions_data.tx_cache.flush();
+    transactions_data.flush();
 }
