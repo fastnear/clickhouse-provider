@@ -1,6 +1,7 @@
 use crate::*;
 use std::collections::HashSet;
 use std::env;
+use std::io::Write;
 use std::str::FromStr;
 
 use clickhouse::Row;
@@ -22,7 +23,7 @@ const NUM_HEADERS_KEY: &str = "num_headers";
 
 const EVENT_JSON_PREFIX: &str = "EVENT_JSON:";
 
-const BLOCK_HEADER_CLEANUP: u64 = 10000;
+const BLOCK_HEADER_CLEANUP: u64 = 100000;
 
 const POTENTIAL_ACCOUNT_ARGS: [&str; 19] = [
     "receiver_id",
@@ -359,18 +360,31 @@ impl TransactionsData {
             .to_string();
 
         for block_height in transaction.blocks {
-            let block_header = self
-                .tx_cache
-                .get_block_header(block_height)
-                .expect("Missing block header for a transaction");
-            self.rows.block_txs.push(BlockTxRow {
-                block_height,
-                block_hash: block_header.hash.to_string(),
-                block_timestamp: block_header.timestamp,
-                transaction_hash: tx_hash.clone(),
-                signer_id: signer_id.clone(),
-                tx_block_height: transaction.tx_block_height,
-            });
+            let block_header = self.tx_cache.get_block_header(block_height);
+            if let Some(block_header) = block_header {
+                self.rows.block_txs.push(BlockTxRow {
+                    block_height,
+                    block_hash: block_header.hash.to_string(),
+                    block_timestamp: block_header.timestamp,
+                    transaction_hash: tx_hash.clone(),
+                    signer_id: signer_id.clone(),
+                    tx_block_height: transaction.tx_block_height,
+                });
+            } else {
+                tracing::log::warn!(target: PROJECT_ID, "Missing block header #{} for a transaction {}", block_height, tx_hash.clone());
+                // Append to a file a record about a missing
+                let mut file = std::fs::OpenOptions::new()
+                    .append(true)
+                    .create(true)
+                    .open("missing_block_headers.txt")
+                    .expect("Failed to open missing_block_headers.txt");
+                writeln!(
+                    file,
+                    "{} {} {} {}",
+                    block_height, tx_hash, signer_id, transaction.tx_block_height
+                )
+                .expect("Failed to write to missing_block_headers.txt");
+            }
         }
 
         let mut accounts = HashSet::new();
