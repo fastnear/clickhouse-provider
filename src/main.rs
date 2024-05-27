@@ -107,7 +107,7 @@ async fn listen_blocks_for_actions(
 
 async fn listen_blocks_for_transactions(
     mut stream: mpsc::Receiver<BlockWithTxHashes>,
-    mut db: ClickDB,
+    db: ClickDB,
     mut transactions_data: TransactionsData,
     last_block_height: u64,
 ) {
@@ -115,11 +115,11 @@ async fn listen_blocks_for_transactions(
         let block_height = block.block.header.height;
         tracing::log::info!(target: PROJECT_ID, "Processing block: {}", block_height);
         transactions_data
-            .process_block(&mut db, block, last_block_height)
+            .process_block(&db, block, last_block_height)
             .await
             .unwrap();
     }
     tracing::log::info!(target: PROJECT_ID, "Committing the last batch");
-    transactions_data.commit(&mut db).await.unwrap();
-    transactions_data.flush();
+    transactions_data.commit(&db).await.unwrap();
+    transactions_data.flush().await.unwrap();
 }
