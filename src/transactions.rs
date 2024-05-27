@@ -1,5 +1,5 @@
 use crate::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::io::Write;
 use std::str::FromStr;
@@ -25,7 +25,7 @@ const TRANSACTIONS_KEY: &str = "transactions";
 
 const EVENT_JSON_PREFIX: &str = "EVENT_JSON:";
 
-const BLOCK_HEADER_CLEANUP: u64 = 100000;
+const BLOCK_HEADER_CLEANUP: u64 = 2000;
 const MAX_COMMIT_HANDLERS: usize = 3;
 
 const POTENTIAL_ACCOUNT_ARGS: [&str; 19] = [
@@ -311,14 +311,7 @@ impl TransactionsData {
             }
         }
 
-        if let Some(last_block_height) = self.tx_cache.get_u64(LAST_BLOCK_HEIGHT_KEY) {
-            let diff = block_height.saturating_sub(last_block_height);
-            for i in 0..=diff.min(BLOCK_HEADER_CLEANUP) {
-                self.tx_cache.remove_block_header(
-                    last_block_height.saturating_sub(BLOCK_HEADER_CLEANUP - i),
-                );
-            }
-        }
+        self.tx_cache.trim_headers();
 
         self.tx_cache.set_u64(LAST_BLOCK_HEIGHT_KEY, block_height);
         // self.tx_cache.flush();
@@ -555,7 +548,7 @@ fn add_accounts_from_receipt(accounts: &mut HashSet<AccountId>, receipt: &views:
 pub struct TxCache {
     pub sled_db: sled::Db,
 
-    pub block_headers: HashMap<BlockHeight, views::BlockHeaderView>,
+    pub block_headers: BTreeMap<BlockHeight, views::BlockHeaderView>,
     pub receipt_to_tx: HashMap<CryptoHash, CryptoHash>,
     pub data_receipts: HashMap<CryptoHash, views::ReceiptView>,
     pub transactions: HashMap<CryptoHash, PendingTransaction>,
@@ -601,6 +594,13 @@ impl TxCache {
         self.sled_db.flush().expect("Failed to flush");
     }
 
+    pub fn trim_headers(&mut self) {
+        while self.block_headers.len() > BLOCK_HEADER_CLEANUP as usize {
+            let block_height = self.block_headers.keys().next().unwrap().clone();
+            self.block_headers.remove(&block_height);
+        }
+    }
+
     fn get_json<T>(&self, key: &str) -> Option<T>
     where
         T: DeserializeOwned,
@@ -643,12 +643,6 @@ impl TxCache {
         self.block_headers.remove(&block_height)
     }
 
-    pub fn remove_block_header(&mut self, block_height: BlockHeight) {
-        if self.block_headers.remove(&block_height).is_some() {
-            return;
-        }
-    }
-
     pub fn get_and_remove_receipt_to_tx(&mut self, receipt_id: &CryptoHash) -> Option<CryptoHash> {
         self.receipt_to_tx.remove(receipt_id)
     }
@@ -667,9 +661,7 @@ impl TxCache {
     }
 
     fn remove_receipt_to_tx(&mut self, receipt_id: &CryptoHash) {
-        if self.receipt_to_tx.remove(receipt_id).is_some() {
-            return;
-        }
+        self.receipt_to_tx.remove(receipt_id);
     }
 
     fn insert_data_receipt(&mut self, data_id: &CryptoHash, receipt: views::ReceiptView) {
