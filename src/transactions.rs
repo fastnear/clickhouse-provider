@@ -148,6 +148,7 @@ impl PendingTransaction {
 }
 
 pub struct TransactionsData {
+    pub commit_every_block: bool,
     pub tx_cache: TxCache,
     pub rows: TxRows,
     pub commit_handlers: Vec<tokio::task::JoinHandle<Result<(), clickhouse::error::Error>>>,
@@ -155,6 +156,9 @@ pub struct TransactionsData {
 
 impl TransactionsData {
     pub fn new() -> Self {
+        let commit_every_block = env::var("COMMIT_EVERY_BLOCK")
+            .map(|v| v == "true")
+            .unwrap_or(false);
         let sled_db_path = env::var("SLED_DB_PATH").expect("Missing SLED_DB_PATH env var");
         if !std::path::Path::new(&sled_db_path).exists() {
             std::fs::create_dir_all(&sled_db_path)
@@ -164,6 +168,7 @@ impl TransactionsData {
         let tx_cache = TxCache::new(sled_db);
 
         Self {
+            commit_every_block,
             tx_cache,
             rows: TxRows::default(),
             commit_handlers: vec![],
@@ -435,7 +440,8 @@ impl TransactionsData {
                 self.rows.receipt_txs.len(),
             );
         }
-        if self.rows.transactions.len() >= db.min_batch || is_round_block {
+        if self.rows.transactions.len() >= db.min_batch || is_round_block || self.commit_every_block
+        {
             self.commit(db).await?;
         }
 
