@@ -5,12 +5,16 @@ use std::io::Write;
 use std::str::FromStr;
 
 use clickhouse::Row;
-use near_indexer::near_primitives::borsh::BorshDeserialize;
-use near_indexer::near_primitives::hash::CryptoHash;
-use near_indexer::near_primitives::types::{AccountId, BlockHeight};
-use near_indexer::near_primitives::views::{ActionView, ReceiptEnumView, SignedTransactionView};
-use near_indexer::near_primitives::{borsh, views};
-use near_indexer::{IndexerExecutionOutcomeWithReceipt, IndexerTransactionWithOutcome};
+use fastnear_primitives::near_indexer_primitives::{
+    IndexerExecutionOutcomeWithReceipt, IndexerTransactionWithOutcome,
+};
+use fastnear_primitives::near_primitives::borsh::BorshDeserialize;
+use fastnear_primitives::near_primitives::hash::CryptoHash;
+use fastnear_primitives::near_primitives::types::{AccountId, BlockHeight};
+use fastnear_primitives::near_primitives::views::{
+    ActionView, ReceiptEnumView, SignedTransactionView,
+};
+use fastnear_primitives::near_primitives::{borsh, views};
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};

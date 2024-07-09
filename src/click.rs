@@ -3,7 +3,7 @@ use std::env;
 
 use serde::Serialize;
 
-use near_indexer::near_primitives::types::BlockHeight;
+use fastnear_primitives::near_primitives::types::BlockHeight;
 use std::time::Duration;
 
 pub const CLICKHOUSE_TARGET: &str = "clickhouse";

@@ -3,10 +3,10 @@ use base64::Engine;
 
 use base64::prelude::BASE64_STANDARD;
 use clickhouse::Row;
-use near_indexer::near_primitives::hash::CryptoHash;
+use fastnear_primitives::near_primitives::hash::CryptoHash;
 
-use near_indexer::near_primitives::types::BlockHeight;
-use near_indexer::near_primitives::views::{
+use fastnear_primitives::near_primitives::types::BlockHeight;
+use fastnear_primitives::near_primitives::views::{
     AccessKeyPermissionView, ActionView, ExecutionOutcomeView, ExecutionStatusView,
     ReceiptEnumView, ReceiptView,
 };

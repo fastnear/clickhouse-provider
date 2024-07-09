@@ -1,20 +1,22 @@
 mod actions;
-mod block_with_tx_hash;
 mod click;
 mod common;
-mod fetcher;
+
 mod transactions;
 
 use crate::actions::ActionsData;
-use crate::block_with_tx_hash::*;
 use crate::click::*;
 use crate::transactions::TransactionsData;
+use std::sync::Arc;
+
 use dotenv::dotenv;
+use fastnear_neardata_fetcher::fetcher;
+use fastnear_primitives::block_with_tx_hash::*;
+use fastnear_primitives::types::ChainId;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
 
 const PROJECT_ID: &str = "provider";
-pub static RUNNING: AtomicBool = AtomicBool::new(true);
 
 const SAFE_CATCH_UP_OFFSET: u64 = 1000;
 
@@ -23,13 +25,16 @@ async fn main() {
     openssl_probe::init_ssl_cert_env_vars();
     dotenv().ok();
 
+    let is_running = Arc::new(AtomicBool::new(true));
+    let ctrl_c_running = is_running.clone();
+
     ctrlc::set_handler(move || {
-        RUNNING.store(false, Ordering::SeqCst);
+        ctrl_c_running.store(false, Ordering::SeqCst);
         println!("Received Ctrl+C, starting shutdown...");
     })
     .expect("Error setting Ctrl+C handler");
 
-    common::setup_tracing("clickhouse=info,provider=info,fetcher=info");
+    common::setup_tracing("clickhouse=info,provider=info,neardata-fetcher=info");
 
     tracing::log::info!(target: PROJECT_ID, "Starting Clickhouse Provider");
 
@@ -39,7 +44,14 @@ async fn main() {
         .expect("Failed to connect to Clickhouse");
 
     let client = reqwest::Client::new();
-    let first_block_height = fetcher::fetch_first_block(&client)
+    let chain_id = ChainId::try_from(std::env::var("CHAIN_ID").expect("CHAIN_ID is not set"))
+        .expect("Invalid chain id");
+    let num_threads = std::env::var("NUM_FETCHING_THREADS")
+        .expect("NUM_FETCHING_THREADS is not set")
+        .parse::<u64>()
+        .expect("Invalid NUM_FETCHING_THREADS");
+
+    let first_block_height = fetcher::fetch_first_block(&client, chain_id)
         .await
         .expect("First block doesn't exists")
         .block
@@ -63,7 +75,17 @@ async fn main() {
 
             let start_block_height = first_block_height.max(min_block_height + 1);
             let (sender, receiver) = mpsc::channel(100);
-            tokio::spawn(fetcher::start_fetcher(client, start_block_height, sender));
+            let config = fetcher::FetcherConfig {
+                num_threads,
+                start_block_height,
+                chain_id,
+            };
+            tokio::spawn(fetcher::start_fetcher(
+                Some(client),
+                config,
+                sender,
+                is_running,
+            ));
             listen_blocks_for_actions(receiver, db, actions_data).await;
         }
         "transactions" => {
@@ -80,7 +102,17 @@ async fn main() {
 
             let start_block_height = first_block_height.max(start_block_height);
             let (sender, receiver) = mpsc::channel(100);
-            tokio::spawn(fetcher::start_fetcher(client, start_block_height, sender));
+            let config = fetcher::FetcherConfig {
+                num_threads,
+                start_block_height,
+                chain_id,
+            };
+            tokio::spawn(fetcher::start_fetcher(
+                Some(client),
+                config,
+                sender,
+                is_running,
+            ));
             listen_blocks_for_transactions(receiver, db, transactions_data, last_block_height)
                 .await;
         }
