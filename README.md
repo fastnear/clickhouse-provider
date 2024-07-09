@@ -89,6 +89,9 @@ CREATE TABLE data
 PRIMARY KEY (block_height, account_id)
 ORDER BY (block_height, account_id, receipt_index)
 
+--- Modify the table to add new action
+alter table actions modify column action Enum('CREATE_ACCOUNT', 'DEPLOY_CONTRACT', 'FUNCTION_CALL', 'TRANSFER', 'STAKE', 'ADD_KEY', 'DELETE_KEY', 'DELETE_ACCOUNT', 'DELEGATE', 'NON_REFUNDABLE_STORAGE_TRANSFER')
+
 ```
 
 ### Clickhouse explorer tables

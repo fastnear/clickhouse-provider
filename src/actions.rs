@@ -35,6 +35,7 @@ pub enum ActionKind {
     DeleteKey = 7,
     DeleteAccount = 8,
     Delegate = 9,
+    NonrefundableStorageTransfer = 10,
 }
 
 #[derive(Row, Serialize)]
@@ -306,6 +307,7 @@ pub fn extract_rows(msg: BlockWithTxHashes) -> Rows {
                     input_data_ids,
                     actions,
                     gas_price,
+                    is_promise_yield: _is_promise_yield,
                 } => {
                     for (log_index, log) in logs.into_iter().enumerate() {
                         let log_index = u16::try_from(log_index).expect("Log index overflow");
@@ -362,6 +364,9 @@ pub fn extract_rows(msg: BlockWithTxHashes) -> Rows {
                                 ActionView::DeleteKey { .. } => ActionKind::DeleteKey,
                                 ActionView::DeleteAccount { .. } => ActionKind::DeleteAccount,
                                 ActionView::Delegate { .. } => ActionKind::Delegate,
+                                // ActionView::NonrefundableStorageTransfer { .. } => {
+                                //     ActionKind::NonrefundableStorageTransfer
+                                // }
                             },
                             action_json: serde_json::to_string(&action).unwrap(),
                             input_data_ids: input_data_ids
@@ -402,6 +407,9 @@ pub fn extract_rows(msg: BlockWithTxHashes) -> Rows {
                                 ActionView::Transfer { deposit, .. } => Some(*deposit),
                                 ActionView::Stake { stake, .. } => Some(*stake),
                                 ActionView::FunctionCall { deposit, .. } => Some(*deposit),
+                                // ActionView::NonrefundableStorageTransfer { deposit } => {
+                                //     Some(*deposit)
+                                // }
                                 _ => None,
                             },
                             gas_price,
@@ -449,7 +457,11 @@ pub fn extract_rows(msg: BlockWithTxHashes) -> Rows {
                     ReceiptEnumView::Action { .. } => {
                         // Ignoring. Processed with the execution outcomes.
                     }
-                    ReceiptEnumView::Data { data_id, data } => {
+                    ReceiptEnumView::Data {
+                        data_id,
+                        data,
+                        is_promise_resume: _is_promise_resume,
+                    } => {
                         rows.data.push(FullDataRow {
                             block_height,
                             block_hash: block_hash.clone(),
