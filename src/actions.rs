@@ -1,8 +1,10 @@
 use crate::*;
 use base64::Engine;
+use std::env;
 
 use base64::prelude::BASE64_STANDARD;
 use clickhouse::Row;
+use fastnear_primitives::near_indexer_primitives::types::AccountId;
 use fastnear_primitives::near_primitives::hash::CryptoHash;
 
 use fastnear_primitives::near_primitives::types::BlockHeight;
@@ -14,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 
 const MAX_TOKEN_LENGTH: usize = 64;
+const MAX_TOKEN_IDS_LENGTH: usize = 4;
 const EVENT_LOG_PREFIX: &str = "EVENT_JSON:";
 
 #[derive(Copy, Clone, Debug, Serialize_repr, Deserialize_repr, PartialEq)]
@@ -70,6 +73,18 @@ pub struct FullActionRow {
     pub tokens_burnt: u128,
     pub method_name: Option<String>,
     pub args: Option<String>,
+
+    pub args_account_id: Option<String>,
+    pub args_new_account_id: Option<String>,
+    pub args_owner_id: Option<String>,
+    pub args_receiver_id: Option<String>,
+    pub args_sender_id: Option<String>,
+    pub args_token_id: Option<String>,
+    pub args_amount: Option<u128>,
+    pub args_balance: Option<u128>,
+    pub args_nft_contract_id: Option<String>,
+    pub args_nft_token_id: Option<String>,
+    pub return_value_int: Option<u128>,
 }
 
 #[derive(Row, Serialize)]
@@ -91,6 +106,17 @@ pub struct FullEventRow {
     pub version: Option<String>,
     pub standard: Option<String>,
     pub event: Option<String>,
+
+    pub data_account_id: Option<String>,
+    pub data_owner_id: Option<String>,
+    pub data_old_owner_id: Option<String>,
+    pub data_new_owner_id: Option<String>,
+    pub data_liquidation_account_id: Option<String>,
+    pub data_authorized_id: Option<String>,
+    pub data_token_ids: Vec<String>,
+    pub data_token_id: Option<String>,
+    pub data_position: Option<String>,
+    pub data_amount: Option<u128>,
 }
 
 #[derive(Row, Serialize)]
@@ -114,89 +140,74 @@ pub struct Rows {
 }
 
 pub struct ActionsData {
+    pub commit_every_block: bool,
     pub rows: Rows,
-    pub last_action_block_height: BlockHeight,
-    pub last_event_block_height: BlockHeight,
-    pub last_data_block_height: BlockHeight,
+    pub commit_handlers: Vec<tokio::task::JoinHandle<Result<(), clickhouse::error::Error>>>,
 }
 
 impl ActionsData {
     pub fn new() -> Self {
+        let commit_every_block = env::var("COMMIT_EVERY_BLOCK")
+            .map(|v| v == "true")
+            .unwrap_or(false);
         Self {
+            commit_every_block,
             rows: Rows::default(),
-            last_action_block_height: 0,
-            last_event_block_height: 0,
-            last_data_block_height: 0,
+            commit_handlers: vec![],
         }
     }
 
-    pub(crate) fn min_restart_block(&self) -> BlockHeight {
-        let min_guaranteed_block = std::cmp::max(
-            self.last_action_block_height / SAVE_STEP * SAVE_STEP,
-            self.last_event_block_height / SAVE_STEP * SAVE_STEP,
-        )
-        .max(self.last_data_block_height / SAVE_STEP * SAVE_STEP);
-        let min_optimistic_block = std::cmp::min(
-            self.last_action_block_height,
-            self.last_event_block_height
-                .min(self.last_data_block_height),
-        );
-        min_guaranteed_block.max(min_optimistic_block)
-    }
-
-    pub async fn fetch_last_block_heights(&mut self, click_db: &mut ClickDB) {
-        self.last_action_block_height = click_db.max("block_height", "actions").await.unwrap_or(0);
-        self.last_event_block_height = click_db.max("block_height", "events").await.unwrap_or(0);
-        self.last_data_block_height = click_db.max("block_height", "data").await.unwrap_or(0);
-        tracing::log::info!(target: CLICKHOUSE_TARGET, "Last block heights: actions={}, events={}, data={}", self.last_action_block_height, self.last_event_block_height, self.last_data_block_height);
-    }
-
-    pub fn merge(&mut self, rows: Rows, block_height: BlockHeight) {
-        if block_height > self.last_action_block_height {
-            self.last_action_block_height = block_height;
-            self.rows.actions.extend(rows.actions);
-        }
-        if block_height > self.last_event_block_height {
-            self.last_event_block_height = block_height;
-            self.rows.events.extend(rows.events);
-        }
-        if block_height > self.last_data_block_height {
-            self.last_data_block_height = block_height;
-            self.rows.data.extend(rows.data);
-        }
-    }
-
-    pub async fn commit(&mut self, click_db: &mut ClickDB) -> clickhouse::error::Result<()> {
-        self.commit_actions(click_db).await?;
-        self.commit_events(click_db).await?;
-        self.commit_data(click_db).await?;
-        Ok(())
-    }
-
-    pub async fn commit_actions(
+    pub async fn maybe_commit(
         &mut self,
-        click_db: &mut ClickDB,
-    ) -> clickhouse::error::Result<()> {
-        if !self.rows.actions.is_empty() {
-            insert_rows_with_retry(&click_db.client, &self.rows.actions, "actions").await?;
-            self.rows.actions.clear();
+        db: &ClickDB,
+        block_height: BlockHeight,
+    ) -> anyhow::Result<()> {
+        let is_round_block = block_height % SAVE_STEP == 0;
+        if is_round_block {
+            tracing::log::info!(
+                target: CLICKHOUSE_TARGET,
+                "#{}: Having {} actions, {} events, {} data",
+                block_height,
+                self.rows.actions.len(),
+                self.rows.events.len(),
+                self.rows.data.len()
+            );
         }
+        if self.rows.actions.len() >= db.min_batch || is_round_block || self.commit_every_block {
+            self.commit(db).await?;
+        }
+
         Ok(())
     }
 
-    pub async fn commit_events(&mut self, click_db: &mut ClickDB) -> clickhouse::error::Result<()> {
-        if !self.rows.events.is_empty() {
-            insert_rows_with_retry(&click_db.client, &self.rows.events, "events").await?;
-            self.rows.events.clear();
+    pub async fn commit(&mut self, db: &ClickDB) -> anyhow::Result<()> {
+        let mut rows = Rows::default();
+        std::mem::swap(&mut rows, &mut self.rows);
+        while self.commit_handlers.len() >= MAX_COMMIT_HANDLERS {
+            self.commit_handlers.remove(0).await??;
         }
-        Ok(())
-    }
+        let db = db.clone();
+        let handler = tokio::spawn(async move {
+            if !rows.actions.is_empty() {
+                insert_rows_with_retry(&db.client, &rows.actions, "actions").await?;
+            }
+            if !rows.events.is_empty() {
+                insert_rows_with_retry(&db.client, &rows.events, "events").await?;
+            }
+            if !rows.data.is_empty() {
+                insert_rows_with_retry(&db.client, &rows.data, "data").await?;
+            }
+            tracing::log::info!(
+                target: CLICKHOUSE_TARGET,
+                "Committed {} actions, {} events, {} data",
+                rows.actions.len(),
+                rows.events.len(),
+                rows.data.len()
+            );
+            Ok::<(), clickhouse::error::Error>(())
+        });
+        self.commit_handlers.push(handler);
 
-    pub async fn commit_data(&mut self, click_db: &mut ClickDB) -> clickhouse::error::Result<()> {
-        if !self.rows.data.is_empty() {
-            insert_rows_with_retry(&click_db.client, &self.rows.data, "data").await?;
-            self.rows.data.clear();
-        }
         Ok(())
     }
 
@@ -204,25 +215,61 @@ impl ActionsData {
         &mut self,
         db: &mut ClickDB,
         block: BlockWithTxHashes,
+        last_db_block_height: BlockHeight,
     ) -> anyhow::Result<()> {
         let block_height = block.block.header.height;
         let rows = extract_rows(block);
-        self.merge(rows, block_height);
+        if block_height > last_db_block_height {
+            self.rows.actions.extend(rows.actions);
+            self.rows.events.extend(rows.events);
+            self.rows.data.extend(rows.data);
+        }
 
         let is_round_block = block_height % SAVE_STEP == 0;
         if is_round_block {
             tracing::log::info!(target: CLICKHOUSE_TARGET, "#{}: Having {} actions, {} events, {} data", block_height, self.rows.actions.len(), self.rows.events.len(), self.rows.data.len());
         }
-        if self.rows.actions.len() >= db.min_batch || is_round_block {
-            self.commit_actions(db).await?;
-        }
-        if self.rows.events.len() >= db.min_batch || is_round_block {
-            self.commit_events(db).await?;
-        }
-        if self.rows.data.len() >= db.min_batch || is_round_block {
-            self.commit_data(db).await?;
+
+        self.maybe_commit(db, block_height).await?;
+        Ok(())
+    }
+
+    pub async fn last_block_height(&mut self, db: &ClickDB) -> BlockHeight {
+        db.max("block_height", "actions").await.unwrap_or(0)
+    }
+
+    pub async fn flush(&mut self) -> anyhow::Result<()> {
+        while let Some(handler) = self.commit_handlers.pop() {
+            handler.await??;
         }
         Ok(())
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ArgsData {
+    pub account_id: Option<AccountId>,
+    pub args_new_account_id: Option<AccountId>,
+    pub args_owner_id: Option<AccountId>,
+    pub receiver_id: Option<AccountId>,
+    pub sender_id: Option<AccountId>,
+    pub token_id: Option<String>,
+    pub nft_contract_id: Option<AccountId>,
+    pub nft_token_id: Option<String>,
+    pub amount: Option<String>,
+    pub balance: Option<String>,
+}
+
+pub fn extract_args_data(action: &ActionView) -> Option<ArgsData> {
+    match action {
+        ActionView::FunctionCall { args, .. } => {
+            let mut args_data: ArgsData = serde_json::from_slice(&args).ok()?;
+            // If token length is larger than 64 bytes, we remove it.
+            limit_length(&mut args_data.token_id);
+            limit_length(&mut args_data.nft_token_id);
+            Some(args_data)
+        }
+        _ => None,
     }
 }
 
@@ -237,11 +284,35 @@ fn string_from_vec_u8(value: &Vec<u8>) -> String {
         .unwrap_or_else(|_| format!("base64:{}", BASE64_STANDARD.encode(value)))
 }
 
+fn extract_return_value_int(execution_status: &ExecutionStatusView) -> Option<u128> {
+    if let ExecutionStatusView::SuccessValue(value) = execution_status {
+        let str_value = serde_json::from_slice::<String>(&value).ok()?;
+        str_value.parse::<u128>().ok()
+    } else {
+        None
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct EventData {
+    pub account_id: Option<AccountId>,
+    pub owner_id: Option<AccountId>,
+    pub old_owner_id: Option<AccountId>,
+    pub new_owner_id: Option<AccountId>,
+    pub liquidation_account_id: Option<AccountId>,
+    pub authorized_id: Option<AccountId>,
+    pub token_ids: Option<Vec<String>>,
+    pub token_id: Option<String>,
+    pub position: Option<String>,
+    pub amount: Option<String>,
+}
+
 #[derive(Deserialize, Debug, Default)]
 pub struct Event {
     pub version: Option<String>,
     pub standard: Option<String>,
     pub event: Option<String>,
+    pub data: Option<Vec<EventData>>,
 }
 
 pub fn parse_event(event: &str) -> Option<Event> {
@@ -249,6 +320,17 @@ pub fn parse_event(event: &str) -> Option<Event> {
     limit_length(&mut event.version);
     limit_length(&mut event.standard);
     limit_length(&mut event.event);
+    if let Some(data) = event.data.as_mut().and_then(|data| data.get_mut(0)) {
+        if let Some(token_ids) = data.token_ids.as_mut() {
+            token_ids.retain(|s| s.len() <= MAX_TOKEN_LENGTH);
+            if token_ids.len() > MAX_TOKEN_IDS_LENGTH {
+                token_ids.resize(MAX_TOKEN_IDS_LENGTH, "".to_string());
+            }
+        }
+        limit_length(&mut data.token_id);
+    } else {
+        event.data = None;
+    }
     Some(event)
 }
 
@@ -285,6 +367,7 @@ pub fn extract_rows(msg: BlockWithTxHashes) -> Rows {
                 ExecutionStatusView::SuccessValue(_) => ReceiptStatus::Success,
                 ExecutionStatusView::SuccessReceiptId(_) => ReceiptStatus::Success,
             };
+            let return_value_int = extract_return_value_int(&execution_status);
             let status_success_value = match &execution_status {
                 ExecutionStatusView::SuccessValue(value) => Some(string_from_vec_u8(value)),
                 _ => None,
@@ -311,12 +394,17 @@ pub fn extract_rows(msg: BlockWithTxHashes) -> Rows {
                 } => {
                     for (log_index, log) in logs.into_iter().enumerate() {
                         let log_index = u16::try_from(log_index).expect("Log index overflow");
-                        let event = if log.starts_with(EVENT_LOG_PREFIX) {
+                        let mut event = if log.starts_with(EVENT_LOG_PREFIX) {
                             parse_event(&log.as_str()[EVENT_LOG_PREFIX.len()..])
                         } else {
                             None
                         }
                         .unwrap_or_default();
+                        let data = event
+                            .data
+                            .take()
+                            .map(|mut data| data.remove(0))
+                            .unwrap_or_default();
                         rows.events.push(FullEventRow {
                             block_height,
                             block_hash: block_hash.clone(),
@@ -335,12 +423,45 @@ pub fn extract_rows(msg: BlockWithTxHashes) -> Rows {
                             version: event.version,
                             standard: event.standard,
                             event: event.event,
+
+                            data_account_id: data
+                                .account_id
+                                .as_ref()
+                                .map(|account_id| account_id.to_string()),
+                            data_owner_id: data
+                                .owner_id
+                                .as_ref()
+                                .map(|owner_id| owner_id.to_string()),
+                            data_old_owner_id: data
+                                .old_owner_id
+                                .as_ref()
+                                .map(|old_owner_id| old_owner_id.to_string()),
+                            data_new_owner_id: data
+                                .new_owner_id
+                                .as_ref()
+                                .map(|new_owner_id| new_owner_id.to_string()),
+                            data_liquidation_account_id: data
+                                .liquidation_account_id
+                                .as_ref()
+                                .map(|liquidation_account_id| liquidation_account_id.to_string()),
+                            data_authorized_id: data
+                                .authorized_id
+                                .as_ref()
+                                .map(|authorized_id| authorized_id.to_string()),
+                            data_token_ids: data.token_ids.clone().unwrap_or_default(),
+                            data_token_id: data.token_id,
+                            data_position: data.position,
+                            data_amount: data
+                                .amount
+                                .as_ref()
+                                .and_then(|amount| amount.parse().ok()),
                         });
                     }
 
                     for (action_index, action) in actions.into_iter().enumerate() {
                         let action_index =
                             u16::try_from(action_index).expect("Action index overflow");
+                        let args_data = extract_args_data(&action);
                         rows.actions.push(FullActionRow {
                             block_height,
                             block_hash: block_hash.clone(),
@@ -431,6 +552,53 @@ pub fn extract_rows(msg: BlockWithTxHashes) -> Rows {
                                 }
                                 _ => None,
                             },
+                            args_account_id: args_data.as_ref().and_then(|args| {
+                                args.account_id
+                                    .as_ref()
+                                    .map(|account_id| account_id.to_string())
+                            }),
+                            args_new_account_id: args_data.as_ref().and_then(|args| {
+                                args.args_new_account_id
+                                    .as_ref()
+                                    .map(|new_account_id| new_account_id.to_string())
+                            }),
+                            args_owner_id: args_data.as_ref().and_then(|args| {
+                                args.args_owner_id
+                                    .as_ref()
+                                    .map(|owner_id| owner_id.to_string())
+                            }),
+                            args_receiver_id: args_data.as_ref().and_then(|args| {
+                                args.receiver_id
+                                    .as_ref()
+                                    .map(|receiver_id| receiver_id.to_string())
+                            }),
+                            args_sender_id: args_data.as_ref().and_then(|args| {
+                                args.sender_id
+                                    .as_ref()
+                                    .map(|sender_id| sender_id.to_string())
+                            }),
+                            args_token_id: args_data
+                                .as_ref()
+                                .and_then(|args| args.token_id.clone()),
+                            args_amount: args_data.as_ref().and_then(|args| {
+                                args.amount.as_ref().and_then(|amount| amount.parse().ok())
+                            }),
+                            args_balance: args_data.as_ref().and_then(|args| {
+                                args.balance
+                                    .as_ref()
+                                    .and_then(|balance| balance.parse().ok())
+                            }),
+                            args_nft_contract_id: args_data.as_ref().and_then(|args| {
+                                args.nft_contract_id
+                                    .as_ref()
+                                    .map(|nft_contract_id| nft_contract_id.to_string())
+                            }),
+                            args_nft_token_id: args_data.as_ref().and_then(|args| {
+                                args.nft_token_id
+                                    .as_ref()
+                                    .map(|nft_token_id| nft_token_id.to_string())
+                            }),
+                            return_value_int,
                         });
                     }
 

@@ -20,7 +20,7 @@ CREATE TABLE actions
     predecessor_id         String COMMENT 'The account ID of the receipt predecessor',
     account_id             String COMMENT 'The account ID of where the receipt is executed',
     status                 Enum('FAILURE', 'SUCCESS') COMMENT 'The status of the receipt execution, either SUCCESS or FAILURE',
-    action                 Enum('CREATE_ACCOUNT', 'DEPLOY_CONTRACT', 'FUNCTION_CALL', 'TRANSFER', 'STAKE', 'ADD_KEY', 'DELETE_KEY', 'DELETE_ACCOUNT', 'DELEGATE') COMMENT 'The action type',
+    action                 Enum('CREATE_ACCOUNT', 'DEPLOY_CONTRACT', 'FUNCTION_CALL', 'TRANSFER', 'STAKE', 'ADD_KEY', 'DELETE_KEY', 'DELETE_ACCOUNT', 'DELEGATE', 'NON_REFUNDABLE_STORAGE_TRANSFER') COMMENT 'The action type',
     action_json            String COMMENT 'The JSON serialization of the ActionView',
     input_data_ids         Array(String) COMMENT 'The input data IDs for the receipt data dependencies of the action',
 
@@ -39,8 +39,32 @@ CREATE TABLE actions
     method_name            Nullable(String) COMMENT 'The method name if the action is FUNCTION_CALL',
     args                   Nullable(String) COMMENT 'The arguments if the action is FUNCTION_CALL (either UTF8 string or base64:)',
 
+    args_account_id Nullable(String) COMMENT '`account_id` argument from the JSON arguments if the action is FUNCTION_CALL',
+    args_new_account_id Nullable(String) COMMENT '`new_account_id` argument from the JSON arguments if the action is FUNCTION_CALL',
+    args_owner_id Nullable(String) COMMENT '`owner_id` argument from the JSON arguments if the action is FUNCTION_CALL',
+    args_receiver_id Nullable(String) COMMENT '`receiver_id` argument from the JSON arguments if the action is FUNCTION_CALL',
+    args_sender_id Nullable(String) COMMENT '`sender_id` argument from the JSON arguments if the action is FUNCTION_CALL',
+    args_token_id Nullable(String) COMMENT '`token_id` argument from the JSON arguments if the action is FUNCTION_CALL',
+    args_amount Nullable(UInt128) COMMENT '`amount` argument from the JSON arguments if the action is FUNCTION_CALL',
+    args_balance Nullable(UInt128) COMMENT '`balance` argument from the JSON arguments if the action is FUNCTION_CALL',
+    args_nft_contract_id Nullable(String) COMMENT '`nft_contract_id` argument from the JSON arguments if the action is FUNCTION_CALL',
+    args_nft_token_id Nullable(String) COMMENT '`nft_token_id` argument from the JSON arguments if the action is FUNCTION_CALL',
+    return_value_int Nullable(UInt128) COMMENT 'The parsed integer string from the returned value of the FUNCTION_CALL action',
+
     INDEX                  block_timestamp_minmax_idx block_timestamp TYPE minmax GRANULARITY 1,
     INDEX                  account_id_bloom_index account_id TYPE bloom_filter() GRANULARITY 1,
+    INDEX signer_id_bloom_index signer_id TYPE bloom_filter() GRANULARITY 1,
+    INDEX block_hash_bloom_index block_hash TYPE bloom_filter() GRANULARITY 1,
+    INDEX transaction_hash_bloom_index transaction_hash TYPE bloom_filter() GRANULARITY 1,
+    INDEX receipt_id_bloom_index receipt_id TYPE bloom_filter() GRANULARITY 1,
+    INDEX precise_public_key_bloom_index public_key TYPE bloom_filter(0.001) GRANULARITY 1,
+    INDEX predecessor_id_bloom_index predecessor_id TYPE bloom_filter() GRANULARITY 1,
+    INDEX method_name_index method_name TYPE set(0) GRANULARITY 1,
+    INDEX args_account_id_bloom_index args_account_id TYPE bloom_filter() GRANULARITY 1,
+    INDEX args_new_account_id_bloom_index args_new_account_id TYPE bloom_filter() GRANULARITY 1,
+    INDEX args_owner_id_bloom_index args_owner_id TYPE bloom_filter() GRANULARITY 1,
+    INDEX args_receiver_id_bloom_index args_receiver_id TYPE bloom_filter() GRANULARITY 1,
+    INDEX args_sender_id_bloom_index args_sender_id TYPE bloom_filter() GRANULARITY 1,
 ) ENGINE = ReplacingMergeTree
 PRIMARY KEY (block_height, account_id)
 ORDER BY (block_height, account_id, receipt_index, action_index)
@@ -65,8 +89,24 @@ CREATE TABLE events
     standard          Nullable(String) COMMENT '`standard` field from the JSON event (if exists)',
     event             Nullable(String) COMMENT '`event` field from the JSON event (if exists)',
 
+    data_account_id Nullable(String) COMMENT '`account_id` field from the first data object in the JSON event',
+    data_owner_id Nullable(String) COMMENT '`owner_id` field from the first data object in the JSON event',
+    data_old_owner_id Nullable(String) COMMENT '`old_owner_id` field from the first data object in the JSON event',
+    data_new_owner_id Nullable(String) COMMENT '`new_owner_id` field from the first data object in the JSON event',
+    data_liquidation_account_id Nullable(String) COMMENT '`liquidation_account_id` field from the first data object in the JSON event',
+    data_authorized_id Nullable(String) COMMENT '`authorized_id` field from the first data object in the JSON event',
+    data_token_ids Array(String) COMMENT '`token_ids` field from the first data object in the JSON event',
+    data_token_id Nullable(String) COMMENT '`token_id` field from the first data object in the JSON event',
+    data_position Nullable(String) COMMENT '`position` field from the first data object in the JSON event',
+    data_amount Nullable(UInt128) COMMENT '`amount` field from the first data object in the JSON event',
+
     INDEX             block_timestamp_minmax_idx block_timestamp TYPE minmax GRANULARITY 1,
     INDEX             account_id_bloom_index account_id TYPE bloom_filter() GRANULARITY 1,
+    INDEX event_set_index event TYPE set(0) GRANULARITY 1,
+    INDEX data_account_id_bloom_index data_account_id TYPE bloom_filter() GRANULARITY 1,
+    INDEX data_owner_id_bloom_index data_owner_id TYPE bloom_filter() GRANULARITY 1,
+    INDEX data_old_owner_id_bloom_index data_old_owner_id TYPE bloom_filter() GRANULARITY 1,
+    INDEX data_new_owner_id_bloom_index data_new_owner_id TYPE bloom_filter() GRANULARITY 1,
 ) ENGINE = ReplacingMergeTree
 PRIMARY KEY (block_height, account_id)
 ORDER BY (block_height, account_id, receipt_index, log_index)
@@ -85,6 +125,7 @@ CREATE TABLE data
 
     INDEX           block_timestamp_minmax_idx block_timestamp TYPE minmax GRANULARITY 1,
     INDEX           account_id_bloom_index account_id TYPE bloom_filter() GRANULARITY 1,
+    INDEX           data_id_bloom_index data_id TYPE bloom_filter() GRANULARITY 1,
 ) ENGINE = ReplacingMergeTree
 PRIMARY KEY (block_height, account_id)
 ORDER BY (block_height, account_id, receipt_index)

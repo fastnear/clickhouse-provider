@@ -30,7 +30,6 @@ const TRANSACTIONS_KEY: &str = "transactions";
 const EVENT_JSON_PREFIX: &str = "EVENT_JSON:";
 
 const BLOCK_HEADER_CLEANUP: u64 = 2000;
-const MAX_COMMIT_HANDLERS: usize = 3;
 
 const POTENTIAL_ACCOUNT_ARGS: [&str; 19] = [
     "receiver_id",
@@ -67,6 +66,7 @@ const POTENTIAL_EVENTS_ARGS: [&str; 10] = [
     "nft_contract_id",
 ];
 
+#[allow(dead_code)]
 #[derive(Deserialize)]
 pub struct EventJson {
     pub version: String,

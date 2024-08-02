@@ -8,6 +8,7 @@ use std::time::Duration;
 
 pub const CLICKHOUSE_TARGET: &str = "clickhouse";
 pub const SAVE_STEP: u64 = 1000;
+pub const MAX_COMMIT_HANDLERS: usize = 3;
 
 #[derive(Clone)]
 pub struct ClickDB {

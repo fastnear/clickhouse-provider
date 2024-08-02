@@ -69,11 +69,8 @@ async fn main() {
     match command {
         "actions" => {
             let mut actions_data = ActionsData::new();
-            actions_data.fetch_last_block_heights(&mut db).await;
-            let min_block_height = actions_data.min_restart_block();
-            tracing::log::info!(target: PROJECT_ID, "Min block height: {}", min_block_height);
-
-            let start_block_height = first_block_height.max(min_block_height + 1);
+            let last_block_height = actions_data.last_block_height(&db).await;
+            let start_block_height = first_block_height.max(last_block_height + 1);
             let (sender, receiver) = mpsc::channel(100);
             let config = fetcher::FetcherConfig {
                 num_threads,
@@ -86,7 +83,7 @@ async fn main() {
                 sender,
                 is_running,
             ));
-            listen_blocks_for_actions(receiver, db, actions_data).await;
+            listen_blocks_for_actions(receiver, db, actions_data, last_block_height).await;
         }
         "transactions" => {
             let mut transactions_data = TransactionsData::new();
@@ -128,13 +125,19 @@ async fn listen_blocks_for_actions(
     mut stream: mpsc::Receiver<BlockWithTxHashes>,
     mut db: ClickDB,
     mut actions_data: ActionsData,
+    last_block_height: u64,
 ) {
     while let Some(block) = stream.recv().await {
-        tracing::log::info!(target: PROJECT_ID, "Processing block: {}", block.block.header.height);
-        actions_data.process_block(&mut db, block).await.unwrap();
+        let block_height = block.block.header.height;
+        tracing::log::info!(target: PROJECT_ID, "Processing block: {}", block_height);
+        actions_data
+            .process_block(&mut db, block, last_block_height)
+            .await
+            .unwrap();
     }
     tracing::log::info!(target: PROJECT_ID, "Committing the last batch");
     actions_data.commit(&mut db).await.unwrap();
+    actions_data.flush().await.unwrap();
 }
 
 async fn listen_blocks_for_transactions(
