@@ -1,13 +1,10 @@
 use crate::*;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::env;
-use std::io::Write;
 use std::str::FromStr;
 
 use clickhouse::Row;
-use fastnear_primitives::near_indexer_primitives::{
-    IndexerExecutionOutcomeWithReceipt, IndexerTransactionWithOutcome,
-};
+use fastnear_primitives::near_indexer_primitives::IndexerTransactionWithOutcome;
 use fastnear_primitives::near_primitives::borsh::BorshDeserialize;
 use fastnear_primitives::near_primitives::hash::CryptoHash;
 use fastnear_primitives::near_primitives::types::{AccountId, BlockHeight};
@@ -16,20 +13,18 @@ use fastnear_primitives::near_primitives::views::{
 };
 use fastnear_primitives::near_primitives::{borsh, views};
 
+use crate::types::{BlockInfo, ImprovedExecutionOutcome, ImprovedExecutionOutcomeWithReceipt};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 const LAST_BLOCK_HEIGHT_KEY: &str = "last_block_height";
 
-const BLOCK_HEADERS_KEY: &str = "block_headers";
 const RECEIPT_TO_TX_KEY: &str = "receipt_to_tx";
 const DATA_RECEIPTS_KEY: &str = "data_receipts";
 const TRANSACTIONS_KEY: &str = "transactions";
 
 const EVENT_JSON_PREFIX: &str = "EVENT_JSON:";
-
-const BLOCK_HEADER_CLEANUP: u64 = 2000;
 
 const POTENTIAL_ACCOUNT_ARGS: [&str; 19] = [
     "receiver_id",
@@ -114,17 +109,28 @@ pub struct ReceiptTxRow {
     pub tx_block_timestamp: u64,
 }
 
+/// Simplified block view in case there a block with no associated transactions.
+/// Also includes some extra metadata.
+#[derive(Row, Serialize, Deserialize, Clone, Debug)]
+pub struct BlockRow {
+    pub block_height: u64,
+    pub block_hash: String,
+    pub block_timestamp: u64,
+    pub prev_block_height: Option<u64>,
+    pub epoch_id: String,
+    pub chunks_included: u64,
+    pub prev_block_hash: String,
+    pub author_id: String,
+    pub signature: String,
+    pub protocol_version: u32,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct TransactionView {
     pub transaction: SignedTransactionView,
-    pub execution_outcome: views::ExecutionOutcomeWithIdView,
-    pub receipts: Vec<IndexerExecutionOutcomeWithReceipt>,
+    pub execution_outcome: ImprovedExecutionOutcome,
+    pub receipts: Vec<ImprovedExecutionOutcomeWithReceipt>,
     pub data_receipts: Vec<views::ReceiptView>,
-}
-
-fn trim_execution_outcome(execution_outcome: &mut views::ExecutionOutcomeWithIdView) {
-    execution_outcome.proof.clear();
-    execution_outcome.outcome.metadata.gas_profile = None;
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -132,7 +138,7 @@ pub struct PendingTransaction {
     pub tx_block_height: BlockHeight,
     pub tx_block_hash: CryptoHash,
     pub tx_block_timestamp: u64,
-    pub blocks: Vec<BlockHeight>,
+    pub blocks: Vec<BlockInfo>,
     pub transaction: TransactionView,
     pub pending_receipt_ids: Vec<CryptoHash>,
 }
@@ -143,6 +149,7 @@ pub struct TxRows {
     pub account_txs: Vec<AccountTxRow>,
     pub block_txs: Vec<BlockTxRow>,
     pub receipt_txs: Vec<ReceiptTxRow>,
+    pub blocks: Vec<BlockRow>,
 }
 
 impl PendingTransaction {
@@ -188,10 +195,25 @@ impl TransactionsData {
         let block_height = block.block.header.height;
         let block_hash = block.block.header.hash;
         let block_timestamp = block.block.header.timestamp;
+        let block_info = BlockInfo {
+            block_height,
+            block_hash: block_hash.clone(),
+            block_timestamp,
+        };
+        let block_row = BlockRow {
+            block_height,
+            block_hash: block_hash.to_string(),
+            block_timestamp,
+            prev_block_height: block.block.header.prev_height,
+            epoch_id: block.block.header.epoch_id.to_string(),
+            chunks_included: block.block.header.chunks_included,
+            prev_block_hash: block.block.header.prev_hash.to_string(),
+            author_id: block.block.author.to_string(),
+            signature: block.block.header.signature.to_string(),
+            protocol_version: block.block.header.latest_protocol_version,
+        };
 
         let skip_missing_receipts = block_height <= last_db_block_height;
-
-        self.tx_cache.insert_block_header(block.block.header);
 
         let mut complete_transactions = vec![];
 
@@ -200,19 +222,22 @@ impl TransactionsData {
             if let Some(chunk) = shard.chunk.take() {
                 for IndexerTransactionWithOutcome {
                     transaction,
-                    mut outcome,
+                    outcome,
                 } in chunk.transactions
                 {
                     let pending_receipt_ids = outcome.execution_outcome.outcome.receipt_ids.clone();
-                    trim_execution_outcome(&mut outcome.execution_outcome);
                     let pending_transaction = PendingTransaction {
                         tx_block_height: block_height,
                         tx_block_hash: block_hash,
                         tx_block_timestamp: block_timestamp,
-                        blocks: vec![block_height],
+                        blocks: vec![block_info.clone()],
                         transaction: TransactionView {
                             transaction,
-                            execution_outcome: outcome.execution_outcome,
+                            execution_outcome: ImprovedExecutionOutcome::from_outcome(
+                                outcome.execution_outcome,
+                                block_timestamp,
+                                block_height,
+                            ),
                             receipts: vec![],
                             data_receipts: vec![],
                         },
@@ -238,8 +263,7 @@ impl TransactionsData {
         for shard in shards {
             for outcome in shard.receipt_execution_outcomes {
                 let receipt = outcome.receipt;
-                let mut execution_outcome = outcome.execution_outcome;
-                trim_execution_outcome(&mut execution_outcome);
+                let execution_outcome = outcome.execution_outcome;
                 let receipt_id = receipt.receipt_id;
                 let tx_hash = match self.tx_cache.get_and_remove_receipt_to_tx(&receipt_id) {
                     Some(tx_hash) => tx_hash,
@@ -258,8 +282,15 @@ impl TransactionsData {
                 pending_transaction
                     .pending_receipt_ids
                     .retain(|r| r != &receipt_id);
-                if pending_transaction.blocks.last() != Some(&block_height) {
-                    pending_transaction.blocks.push(block_height);
+                if pending_transaction
+                    .blocks
+                    .last()
+                    .as_ref()
+                    .unwrap()
+                    .block_height
+                    != block_height
+                {
+                    pending_transaction.blocks.push(block_info.clone());
                 }
 
                 // Extracting matching data receipts
@@ -300,13 +331,16 @@ impl TransactionsData {
                 };
 
                 let pending_receipt_ids = execution_outcome.outcome.receipt_ids.clone();
-                pending_transaction
-                    .transaction
-                    .receipts
-                    .push(IndexerExecutionOutcomeWithReceipt {
-                        execution_outcome,
+                pending_transaction.transaction.receipts.push(
+                    ImprovedExecutionOutcomeWithReceipt {
+                        execution_outcome: ImprovedExecutionOutcome::from_outcome(
+                            execution_outcome,
+                            block_timestamp,
+                            block_height,
+                        ),
                         receipt,
-                    });
+                    },
+                );
                 pending_transaction
                     .pending_receipt_ids
                     .extend(pending_receipt_ids.clone());
@@ -320,14 +354,13 @@ impl TransactionsData {
             }
         }
 
-        self.tx_cache.trim_headers();
-
         self.tx_cache.set_u64(LAST_BLOCK_HEIGHT_KEY, block_height);
         // self.tx_cache.flush();
 
         tracing::log::info!(target: PROJECT_ID, "#{}: Complete {} transactions. Pending {}", block_height, complete_transactions.len(), self.tx_cache.stats());
 
         if block_height > last_db_block_height {
+            self.rows.blocks.push(block_row);
             for transaction in complete_transactions {
                 self.process_transaction(transaction).await?;
             }
@@ -340,7 +373,7 @@ impl TransactionsData {
 
     async fn process_transaction(&mut self, transaction: PendingTransaction) -> anyhow::Result<()> {
         let tx_hash = transaction.transaction_hash().to_string();
-        let last_block_height = *transaction.blocks.last().unwrap();
+        let last_block_info = transaction.blocks.last().cloned().unwrap();
         let signer_id = transaction
             .transaction
             .transaction
@@ -348,33 +381,15 @@ impl TransactionsData {
             .clone()
             .to_string();
 
-        for block_height in transaction.blocks {
-            let block_header = self.tx_cache.get_and_remove_block_header(block_height);
-            if let Some(block_header) = block_header {
-                self.rows.block_txs.push(BlockTxRow {
-                    block_height,
-                    block_hash: block_header.hash.to_string(),
-                    block_timestamp: block_header.timestamp,
-                    transaction_hash: tx_hash.clone(),
-                    signer_id: signer_id.clone(),
-                    tx_block_height: transaction.tx_block_height,
-                });
-                self.tx_cache.insert_block_header(block_header);
-            } else {
-                tracing::log::warn!(target: PROJECT_ID, "Missing block header #{} for a transaction {}", block_height, tx_hash.clone());
-                // Append to a file a record about a missing
-                let mut file = std::fs::OpenOptions::new()
-                    .append(true)
-                    .create(true)
-                    .open("missing_block_headers.txt")
-                    .expect("Failed to open missing_block_headers.txt");
-                writeln!(
-                    file,
-                    "{} {} {} {}",
-                    block_height, tx_hash, signer_id, transaction.tx_block_height
-                )
-                .expect("Failed to write to missing_block_headers.txt");
-            }
+        for block_info in transaction.blocks {
+            self.rows.block_txs.push(BlockTxRow {
+                block_height: block_info.block_height,
+                block_hash: block_info.block_hash.to_string(),
+                block_timestamp: block_info.block_timestamp,
+                transaction_hash: tx_hash.clone(),
+                signer_id: signer_id.clone(),
+                tx_block_height: transaction.tx_block_height,
+            });
         }
 
         let mut accounts = HashSet::new();
@@ -419,7 +434,7 @@ impl TransactionsData {
             tx_block_hash: transaction.tx_block_hash.to_string(),
             tx_block_timestamp: transaction.tx_block_timestamp,
             transaction: serde_json::to_string(&transaction.transaction).unwrap(),
-            last_block_height,
+            last_block_height: last_block_info.block_height,
         });
 
         // TODO: Save TX to redis
@@ -436,12 +451,13 @@ impl TransactionsData {
         if is_round_block {
             tracing::log::info!(
                 target: CLICKHOUSE_TARGET,
-                "#{}: Having {} transactions, {} account_txs, {} block_txs, {} receipts_txs",
+                "#{}: Having {} transactions, {} account_txs, {} block_txs, {} receipts_txs, {} blocks",
                 block_height,
                 self.rows.transactions.len(),
                 self.rows.account_txs.len(),
                 self.rows.block_txs.len(),
                 self.rows.receipt_txs.len(),
+                self.rows.blocks.len(),
             );
         }
         if self.rows.transactions.len() >= db.min_batch || is_round_block || self.commit_every_block
@@ -472,18 +488,18 @@ impl TransactionsData {
             if !rows.receipt_txs.is_empty() {
                 insert_rows_with_retry(&db.client, &rows.receipt_txs, "receipt_txs").await?;
             }
+            if !rows.blocks.is_empty() {
+                insert_rows_with_retry(&db.client, &rows.blocks, "blocks").await?;
+            }
             tracing::log::info!(
                 target: CLICKHOUSE_TARGET,
-                "Committed {} transactions, {} account_txs, {} block_txs, {} receipts_txs",
+                "Committed {} transactions, {} account_txs, {} block_txs, {} receipts_txs, {} blocks",
                 rows.transactions.len(),
                 rows.account_txs.len(),
                 rows.block_txs.len(),
                 rows.receipt_txs.len(),
+                rows.blocks.len(),
             );
-            rows.transactions.clear();
-            rows.account_txs.clear();
-            rows.block_txs.clear();
-            rows.receipt_txs.clear();
             Ok::<(), clickhouse::error::Error>(())
         });
         self.commit_handlers.push(handler);
@@ -492,7 +508,7 @@ impl TransactionsData {
     }
 
     pub async fn last_block_height(&mut self, db: &ClickDB) -> BlockHeight {
-        let db_block = db.max("block_height", "block_txs").await.unwrap_or(0);
+        let db_block = db.max("block_height", "blocks").await.unwrap_or(0);
         let cache_block = self.tx_cache.get_u64(LAST_BLOCK_HEIGHT_KEY).unwrap_or(0);
         db_block.max(cache_block)
     }
@@ -558,7 +574,6 @@ fn add_accounts_from_receipt(accounts: &mut HashSet<AccountId>, receipt: &views:
 pub struct TxCache {
     pub sled_db: sled::Db,
 
-    pub block_headers: BTreeMap<BlockHeight, views::BlockHeaderView>,
     pub receipt_to_tx: HashMap<CryptoHash, CryptoHash>,
     pub data_receipts: HashMap<CryptoHash, views::ReceiptView>,
     pub transactions: HashMap<CryptoHash, PendingTransaction>,
@@ -569,7 +584,6 @@ impl TxCache {
     pub fn new(sled: sled::Db) -> Self {
         let mut this = Self {
             sled_db: sled,
-            block_headers: Default::default(),
             receipt_to_tx: Default::default(),
             data_receipts: Default::default(),
             transactions: Default::default(),
@@ -577,7 +591,6 @@ impl TxCache {
         };
         this.last_block_height = this.get_u64(LAST_BLOCK_HEIGHT_KEY).unwrap_or(0);
 
-        this.block_headers = this.get_json(BLOCK_HEADERS_KEY).unwrap_or_default();
         this.receipt_to_tx = this.get_json(RECEIPT_TO_TX_KEY).unwrap_or_default();
         this.data_receipts = this.get_json(DATA_RECEIPTS_KEY).unwrap_or_default();
         this.transactions = this.get_json(TRANSACTIONS_KEY).unwrap_or_default();
@@ -587,28 +600,19 @@ impl TxCache {
 
     pub fn stats(&self) -> String {
         format!(
-            "mem: {} tx, {} r, {} dr, {} h",
+            "mem: {} tx, {} r, {} dr",
             self.transactions.len(),
             self.receipt_to_tx.len(),
             self.data_receipts.len(),
-            self.block_headers.len(),
         )
     }
 
     pub fn flush(&self) {
-        self.set_json(BLOCK_HEADERS_KEY, &self.block_headers);
         self.set_json(RECEIPT_TO_TX_KEY, &self.receipt_to_tx);
         self.set_json(DATA_RECEIPTS_KEY, &self.data_receipts);
         self.set_json(TRANSACTIONS_KEY, &self.transactions);
 
         self.sled_db.flush().expect("Failed to flush");
-    }
-
-    pub fn trim_headers(&mut self) {
-        while self.block_headers.len() > BLOCK_HEADER_CLEANUP as usize {
-            let block_height = self.block_headers.keys().next().unwrap().clone();
-            self.block_headers.remove(&block_height);
-        }
     }
 
     fn get_json<T>(&self, key: &str) -> Option<T>
@@ -629,28 +633,6 @@ impl TxCache {
             .insert(key, serde_json::to_vec(&value).unwrap())
             .expect("Failed to set")
             .is_some()
-    }
-
-    pub fn insert_block_header(&mut self, block_header: views::BlockHeaderView) {
-        // In-memory insert.
-        let block_height = block_header.height;
-        let hash = block_header.hash;
-        let old_header = self.block_headers.insert(block_height, block_header);
-        if let Some(old_header) = old_header {
-            assert_eq!(
-                old_header.hash, hash,
-                "Header mismatch at {}!",
-                old_header.height
-            );
-            tracing::log::warn!(target: PROJECT_ID, "Duplicate header: {}", old_header.height);
-        }
-    }
-
-    pub fn get_and_remove_block_header(
-        &mut self,
-        block_height: BlockHeight,
-    ) -> Option<views::BlockHeaderView> {
-        self.block_headers.remove(&block_height)
     }
 
     pub fn get_and_remove_receipt_to_tx(&mut self, receipt_id: &CryptoHash) -> Option<CryptoHash> {

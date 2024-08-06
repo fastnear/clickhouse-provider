@@ -3,6 +3,7 @@ mod click;
 mod common;
 
 mod transactions;
+mod types;
 
 use crate::actions::ActionsData;
 use crate::click::*;
