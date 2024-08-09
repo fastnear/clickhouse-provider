@@ -191,10 +191,18 @@ impl TransactionsData {
         db: &ClickDB,
         block: BlockWithTxHashes,
         last_db_block_height: BlockHeight,
-    ) -> anyhow::Result<()> {
+        prev_block_hash: Option<CryptoHash>,
+    ) -> anyhow::Result<CryptoHash> {
         let block_height = block.block.header.height;
         let block_hash = block.block.header.hash;
         let block_timestamp = block.block.header.timestamp;
+        if let Some(prev_block_hash) = prev_block_hash {
+            assert_eq!(
+                prev_block_hash, block.block.header.prev_hash,
+                "Invalid prev_block_hash for block height {}",
+                block_height
+            );
+        }
         let block_info = BlockInfo {
             block_height,
             block_hash: block_hash.clone(),
@@ -371,7 +379,7 @@ impl TransactionsData {
 
         self.maybe_commit(db, block_height).await?;
 
-        Ok(())
+        Ok(block_hash)
     }
 
     async fn process_transaction(&mut self, transaction: PendingTransaction) -> anyhow::Result<()> {

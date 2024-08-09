@@ -147,13 +147,16 @@ async fn listen_blocks_for_transactions(
     mut transactions_data: TransactionsData,
     last_block_height: u64,
 ) {
+    let mut prev_block_hash = None;
     while let Some(block) = stream.recv().await {
         let block_height = block.block.header.height;
         tracing::log::info!(target: PROJECT_ID, "Processing block: {}", block_height);
-        transactions_data
-            .process_block(&db, block, last_block_height)
-            .await
-            .unwrap();
+        prev_block_hash = Some(
+            transactions_data
+                .process_block(&db, block, last_block_height, prev_block_hash)
+                .await
+                .unwrap(),
+        );
     }
     tracing::log::info!(target: PROJECT_ID, "Committing the last batch");
     transactions_data.commit(&db).await.unwrap();
