@@ -272,7 +272,10 @@ impl TransactionsData {
                             tracing::log::warn!(target: PROJECT_ID, "Missing tx_hash for action receipt_id: {}", receipt_id);
                             continue;
                         }
-                        panic!("Missing tx_hash for receipt_id");
+                        panic!(
+                            "Missing tx_hash for receipt_id {} at block {}",
+                            receipt_id, block_height
+                        );
                     }
                 };
                 let mut pending_transaction = self
