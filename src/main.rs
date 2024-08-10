@@ -39,7 +39,7 @@ async fn main() {
 
     tracing::log::info!(target: PROJECT_ID, "Starting Clickhouse Provider");
 
-    let mut db = ClickDB::new(10000);
+    let db = ClickDB::new(10000);
     db.verify_connection()
         .await
         .expect("Failed to connect to Clickhouse");
@@ -88,7 +88,11 @@ async fn main() {
         }
         "transactions" => {
             let mut transactions_data = TransactionsData::new();
-            let last_block_height = transactions_data.last_block_height(&mut db).await;
+            let last_block_height = transactions_data.last_block_height(&db).await;
+            let last_block_height = args
+                .get(2)
+                .map(|v| v.parse().expect("Failed to parse start block"))
+                .unwrap_or(last_block_height);
             let is_cache_ready = transactions_data.is_cache_ready(last_block_height);
             tracing::log::info!(target: PROJECT_ID, "Last block height: {}. Cache is ready: {}", last_block_height, is_cache_ready);
 
