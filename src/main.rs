@@ -66,11 +66,15 @@ async fn main() {
         .get(1)
         .map(|arg| arg.as_str())
         .expect("You need to provide a command");
+    let backfill_block_height = args
+        .get(2)
+        .map(|v| v.parse().expect("Failed to parse backfill block height"));
 
     match command {
         "actions" => {
             let mut actions_data = ActionsData::new();
-            let last_block_height = actions_data.last_block_height(&db).await;
+            let db_last_block_height = actions_data.last_block_height(&db).await;
+            let last_block_height = backfill_block_height.unwrap_or(db_last_block_height);
             let start_block_height = first_block_height.max(last_block_height + 1);
             let (sender, receiver) = mpsc::channel(100);
             let config = fetcher::FetcherConfig {
@@ -88,11 +92,8 @@ async fn main() {
         }
         "transactions" => {
             let mut transactions_data = TransactionsData::new();
-            let last_block_height = transactions_data.last_block_height(&db).await;
-            let last_block_height = args
-                .get(2)
-                .map(|v| v.parse().expect("Failed to parse start block"))
-                .unwrap_or(last_block_height);
+            let db_last_block_height = transactions_data.last_block_height(&db).await;
+            let last_block_height = backfill_block_height.unwrap_or(db_last_block_height);
             let is_cache_ready = transactions_data.is_cache_ready(last_block_height);
             tracing::log::info!(target: PROJECT_ID, "Last block height: {}. Cache is ready: {}", last_block_height, is_cache_ready);
 
