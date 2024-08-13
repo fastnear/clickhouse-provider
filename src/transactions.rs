@@ -608,15 +608,43 @@ impl TxCache {
 
     fn insert_data_receipt(&mut self, data_id: &CryptoHash, receipt: views::ReceiptView) {
         let receipt_id = receipt.receipt_id;
+        let is_promise_resume = match &receipt.receipt {
+            ReceiptEnumView::Action { .. } => false,
+            ReceiptEnumView::Data {
+                is_promise_resume, ..
+            } => *is_promise_resume,
+        };
         let old_receipt = self.data_receipts.insert(*data_id, receipt);
         // In-memory insert.
         if let Some(old_receipt) = old_receipt {
-            assert_eq!(
-                old_receipt.receipt_id, receipt_id,
-                "Duplicate data_id: {} with different receipt_id!",
-                data_id
-            );
-            tracing::log::warn!(target: PROJECT_ID, "Duplicate data_id: {}", data_id);
+            if old_receipt.receipt_id != receipt_id {
+                let old_is_promise_resume = match &old_receipt.receipt {
+                    ReceiptEnumView::Action { .. } => false,
+                    ReceiptEnumView::Data {
+                        is_promise_resume, ..
+                    } => *is_promise_resume,
+                };
+                assert!(
+                    is_promise_resume && old_is_promise_resume,
+                    "Duplicate data_id: {} with different receipt_ids: new {} and old {} while one of them is not promise_resume {} and {}",
+                    data_id,
+                    receipt_id,
+                    old_receipt.receipt_id,
+                    is_promise_resume,
+                    old_is_promise_resume
+                );
+                tracing::log::warn!(target: PROJECT_ID,
+                    "Duplicate data_id: {} with different receipt_ids: new {} and old {}. Ignoring new {}",
+                    data_id,
+                    receipt_id,
+                    old_receipt.receipt_id,
+                    receipt_id
+                );
+                // Restoring the old receipt. Ignoring the new one.
+                self.data_receipts.insert(*data_id, old_receipt);
+            } else {
+                tracing::log::warn!(target: PROJECT_ID, "Duplicate data_id: {} with the same receipt id {}", data_id, receipt_id);
+            }
         }
     }
 
