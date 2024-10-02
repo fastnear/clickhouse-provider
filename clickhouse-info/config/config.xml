@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<clickhouse>
+    <path>./clickhouse-info/data/</path>
+
+    <listen_host>0.0.0.0</listen_host>
+    <tcp_port>9000</tcp_port>
+
+    <!-- Apparently we need this -->
+    <profiles>
+        <default>
+        </default>
+    </profiles>
+
+    <logger>
+        <level>debug</level>
+        <log>./clickhouse-info/logs/clickhouse-server.log</log>
+        <errorlog>./clickhouse-info/logs/clickhouse-server.err.log</errorlog>
+    </logger>
+
+    <users>
+        <default>
+            <password></password>
+            <networks>
+                <ip>::/0</ip>
+            </networks>
+            <profile>default</profile>
+            <quota>default</quota>
+        </default>
+    </users>
+</clickhouse>
+

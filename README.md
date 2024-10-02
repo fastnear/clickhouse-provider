@@ -1,224 +1,87 @@
-## Clickhouse Provider based on FASTNEAR's indexed neardata xyz
+# FASTNEAR Clickhouse Provider
 
-### Create clickhouse table
+## Getting started
 
-For generic action view:
+Clickhouse instructions taken from https://clickhouse.com/docs/en/getting-started/quick-start
 
-```sql
--- This is a ClickHouse table.
-CREATE TABLE actions
-(
-    block_height           UInt64 COMMENT 'Block height',
-    block_hash             String COMMENT 'Block hash',
-    block_timestamp        DateTime64(9, 'UTC') COMMENT 'Block timestamp in UTC',
-    transaction_hash       String COMMENT 'Transaction hash',
-    receipt_id             String COMMENT 'Receipt hash',
-    receipt_index          UInt32 COMMENT 'Index of the receipt that appears in the block across all shards',
-    action_index           UInt16 COMMENT 'Index of the actions within the receipt',
-    signer_id              String COMMENT 'The account ID of the transaction signer',
-    signer_public_key      String COMMENT 'The public key of the transaction signer',
-    predecessor_id         String COMMENT 'The account ID of the receipt predecessor',
-    account_id             String COMMENT 'The account ID of where the receipt is executed',
-    status                 Enum('FAILURE', 'SUCCESS') COMMENT 'The status of the receipt execution, either SUCCESS or FAILURE',
-    action                 Enum('CREATE_ACCOUNT', 'DEPLOY_CONTRACT', 'FUNCTION_CALL', 'TRANSFER', 'STAKE', 'ADD_KEY', 'DELETE_KEY', 'DELETE_ACCOUNT', 'DELEGATE', 'NON_REFUNDABLE_STORAGE_TRANSFER') COMMENT 'The action type',
-    action_json            String COMMENT 'The JSON serialization of the ActionView',
-    input_data_ids         Array(String) COMMENT 'The input data IDs for the receipt data dependencies of the action',
+The first command will create a binary, and it's best to navigate to the root directory of this project.
 
-    status_success_value   Nullable(String) COMMENT 'Value, if the status is SuccessValue (either UTF8 string or a base64:)',
-    status_success_receipt Nullable(String) COMMENT 'The receipt ID, if the status is SuccessReceipt',
-    status_failure         Nullable(String) COMMENT 'The json serialized error message, if the status is Failure',
+Run this command to build the binary:
 
-    contract_hash          Nullable(String) COMMENT 'The hash of the contract if the action is DEPLOY_CONTRACT',
-    public_key             Nullable(String) COMMENT 'The public key used in the action if the action is ADD_KEY or DELETE_KEY',
-    access_key_contract_id Nullable(String) COMMENT 'The contract ID of the limited access key if the action is ADD_KEY and not a full access key',
-    deposit                Nullable(UInt128) COMMENT 'The amount of attached deposit in yoctoNEAR if the action is FUNCTION_CALL, STAKE or TRANSFER',
-    gas_price              UInt128 COMMENT 'The gas price in yoctoNEAR for the receipt',
-    attached_gas           Nullable(UInt64) COMMENT 'The amount of attached gas if the action is FUNCTION_CALL',
-    gas_burnt              UInt64 COMMENT 'The amount of burnt gas for the execution of the whole receipt',
-    tokens_burnt           UInt128 COMMENT 'The amount of tokens in yoctoNEAR burnt for the execution of the whole receipt',
-    method_name            Nullable(String) COMMENT 'The method name if the action is FUNCTION_CALL',
-    args                   Nullable(String) COMMENT 'The arguments if the action is FUNCTION_CALL (either UTF8 string or base64:)',
+    curl https://clickhouse.com/ | sh
 
-    args_account_id Nullable(String) COMMENT '`account_id` argument from the JSON arguments if the action is FUNCTION_CALL',
-    args_new_account_id Nullable(String) COMMENT '`new_account_id` argument from the JSON arguments if the action is FUNCTION_CALL',
-    args_owner_id Nullable(String) COMMENT '`owner_id` argument from the JSON arguments if the action is FUNCTION_CALL',
-    args_receiver_id Nullable(String) COMMENT '`receiver_id` argument from the JSON arguments if the action is FUNCTION_CALL',
-    args_sender_id Nullable(String) COMMENT '`sender_id` argument from the JSON arguments if the action is FUNCTION_CALL',
-    args_token_id Nullable(String) COMMENT '`token_id` argument from the JSON arguments if the action is FUNCTION_CALL',
-    args_amount Nullable(UInt128) COMMENT '`amount` argument from the JSON arguments if the action is FUNCTION_CALL',
-    args_balance Nullable(UInt128) COMMENT '`balance` argument from the JSON arguments if the action is FUNCTION_CALL',
-    args_nft_contract_id Nullable(String) COMMENT '`nft_contract_id` argument from the JSON arguments if the action is FUNCTION_CALL',
-    args_nft_token_id Nullable(String) COMMENT '`nft_token_id` argument from the JSON arguments if the action is FUNCTION_CALL',
-    return_value_int Nullable(UInt128) COMMENT 'The parsed integer string from the returned value of the FUNCTION_CALL action',
+Now run the binary passing "server" and our development config:
 
-    INDEX                  block_timestamp_minmax_idx block_timestamp TYPE minmax GRANULARITY 1,
-    INDEX                  account_id_bloom_index account_id TYPE bloom_filter() GRANULARITY 1,
-    INDEX signer_id_bloom_index signer_id TYPE bloom_filter() GRANULARITY 1,
-    INDEX block_hash_bloom_index block_hash TYPE bloom_filter() GRANULARITY 1,
-    INDEX transaction_hash_bloom_index transaction_hash TYPE bloom_filter() GRANULARITY 1,
-    INDEX receipt_id_bloom_index receipt_id TYPE bloom_filter() GRANULARITY 1,
-    INDEX precise_public_key_bloom_index public_key TYPE bloom_filter(0.001) GRANULARITY 1,
-    INDEX predecessor_id_bloom_index predecessor_id TYPE bloom_filter() GRANULARITY 1,
-    INDEX method_name_index method_name TYPE set(0) GRANULARITY 1,
-    INDEX args_account_id_bloom_index args_account_id TYPE bloom_filter() GRANULARITY 1,
-    INDEX args_new_account_id_bloom_index args_new_account_id TYPE bloom_filter() GRANULARITY 1,
-    INDEX args_owner_id_bloom_index args_owner_id TYPE bloom_filter() GRANULARITY 1,
-    INDEX args_receiver_id_bloom_index args_receiver_id TYPE bloom_filter() GRANULARITY 1,
-    INDEX args_sender_id_bloom_index args_sender_id TYPE bloom_filter() GRANULARITY 1,
-) ENGINE = ReplacingMergeTree
-PRIMARY KEY (block_height, account_id)
-ORDER BY (block_height, account_id, receipt_index, action_index)
+    ./clickhouse server --config-file clickhouse-info/config/config.xml
 
-CREATE TABLE events
-(
-    block_height      UInt64 COMMENT 'Block height',
-    block_hash        String COMMENT 'Block hash',
-    block_timestamp   DateTime64(9, 'UTC') COMMENT 'Block timestamp in UTC',
-    transaction_hash  String COMMENT 'Transaction hash',
-    receipt_id        String COMMENT 'Receipt hash',
-    receipt_index     UInt32 COMMENT 'Index of the receipt that appears in the block across all shards',
-    log_index         UInt16 COMMENT 'Index of the log within the receipt',
-    signer_id         String COMMENT 'The account ID of the transaction signer',
-    signer_public_key String COMMENT 'The public key of the transaction signer',
-    predecessor_id    String COMMENT 'The account ID of the receipt predecessor',
-    account_id        String COMMENT 'The account ID of where the receipt is executed',
-    status            Enum('FAILURE', 'SUCCESS') COMMENT 'The status of the receipt execution, either SUCCESS or FAILURE',
-    log               String COMMENT 'The LogEntry',
+(**Ctrl + C** to exit)
 
-    version           Nullable(String) COMMENT '`version` field from the JSON event (if exists)',
-    standard          Nullable(String) COMMENT '`standard` field from the JSON event (if exists)',
-    event             Nullable(String) COMMENT '`event` field from the JSON event (if exists)',
+Access the basic terminal client:
 
-    data_account_id Nullable(String) COMMENT '`account_id` field from the first data object in the JSON event',
-    data_owner_id Nullable(String) COMMENT '`owner_id` field from the first data object in the JSON event',
-    data_old_owner_id Nullable(String) COMMENT '`old_owner_id` field from the first data object in the JSON event',
-    data_new_owner_id Nullable(String) COMMENT '`new_owner_id` field from the first data object in the JSON event',
-    data_liquidation_account_id Nullable(String) COMMENT '`liquidation_account_id` field from the first data object in the JSON event',
-    data_authorized_id Nullable(String) COMMENT '`authorized_id` field from the first data object in the JSON event',
-    data_token_ids Array(String) COMMENT '`token_ids` field from the first data object in the JSON event',
-    data_token_id Nullable(String) COMMENT '`token_id` field from the first data object in the JSON event',
-    data_position Nullable(String) COMMENT '`position` field from the first data object in the JSON event',
-    data_amount Nullable(UInt128) COMMENT '`amount` field from the first data object in the JSON event',
+    ./clickhouse client
 
-    INDEX             block_timestamp_minmax_idx block_timestamp TYPE minmax GRANULARITY 1,
-    INDEX             account_id_bloom_index account_id TYPE bloom_filter() GRANULARITY 1,
-    INDEX event_set_index event TYPE set(0) GRANULARITY 1,
-    INDEX data_account_id_bloom_index data_account_id TYPE bloom_filter() GRANULARITY 1,
-    INDEX data_owner_id_bloom_index data_owner_id TYPE bloom_filter() GRANULARITY 1,
-    INDEX data_old_owner_id_bloom_index data_old_owner_id TYPE bloom_filter() GRANULARITY 1,
-    INDEX data_new_owner_id_bloom_index data_new_owner_id TYPE bloom_filter() GRANULARITY 1,
-) ENGINE = ReplacingMergeTree
-PRIMARY KEY (block_height, account_id)
-ORDER BY (block_height, account_id, receipt_index, log_index)
+(**Ctrl + D** to exit)
 
-CREATE TABLE data
-(
-    block_height    UInt64 COMMENT 'Block height',
-    block_hash      String COMMENT 'Block hash',
-    block_timestamp DateTime64(9, 'UTC') COMMENT 'Block timestamp in UTC',
-    receipt_id      String COMMENT 'Receipt hash',
-    receipt_index   UInt32 COMMENT 'Index of the receipt that appears in the block across all shards',
-    predecessor_id  String COMMENT 'The account ID of the receipt predecessor',
-    account_id      String COMMENT 'The account ID of where the receipt is executed',
-    data_id         String COMMENT 'The Data ID',
-    data            Nullable(String) COMMENT 'The Data (either UTF8 string or base64:)',
+Create two new databases (using the `:)` prompt in the `client`):
 
-    INDEX           block_timestamp_minmax_idx block_timestamp TYPE minmax GRANULARITY 1,
-    INDEX           account_id_bloom_index account_id TYPE bloom_filter() GRANULARITY 1,
-    INDEX           data_id_bloom_index data_id TYPE bloom_filter() GRANULARITY 1,
-) ENGINE = ReplacingMergeTree
-PRIMARY KEY (block_height, account_id)
-ORDER BY (block_height, account_id, receipt_index)
+    CREATE DATABASE fastnear_testnet_actions;
+    CREATE DATABASE fastnear_testnet_tx_details;
 
---- Modify the table to add new action
-alter table actions modify column action Enum('CREATE_ACCOUNT', 'DEPLOY_CONTRACT', 'FUNCTION_CALL', 'TRANSFER', 'STAKE', 'ADD_KEY', 'DELETE_KEY', 'DELETE_ACCOUNT', 'DELEGATE', 'NON_REFUNDABLE_STORAGE_TRANSFER')
+Show it for a sanity check:
+
+    SHOW DATABASES
+
+Your experience might/should look like this:
+
+![Sanity check screenshot of creating db, using Clickhouse client](readme-assets/getting-started-screenshot.png)
+
+Next, we can import a script to create an example table that works for storing NEAR Protocol [Actions](https://nomicon.io/RuntimeSpec/Actions).
+
+There are files in the `db-import` folder demonstrating schema creation. Let's exit the Clickhouse client with Ctrl + D. We'll execute the first script, creating all the tables necessary to index basic NEAR Actions.
+
+    ./clickhouse client -d fastnear_testnet_actions --queries-file clickhouse-info/db-schemas/actions-events-data.sql
+
+Let's use the client to confirm the import:
+
+    ./clickhouse client -d fastnear_testnet_actions
+
+Show the database tables, expecting `actions`, `data`, and `events`:
+
+    SHOW TABLES
+
+Describe the `data` table:
+
+    DESC data
+
+What you might expect to see from those commands:
+
+![Showing created tables and describing the schema of a table](readme-assets/confirm-first-import.png)
+
+Finally, let's import the other tables using another script. Press Ctrl + D to exit the client and run:
+
+    ./clickhouse client -d fastnear_testnet_tx_details --queries-file clickhouse-info/db-schemas/transactions-accounts-blocks-receipts.sql
+
+## File structure
+
+Exploring the `clickhouse-info` directory:
 
 ```
-
-### Clickhouse explorer tables
-
-The explorer is transaction focused. Everything is bundled around transactions.
-
-```sql
--- This is a ClickHouse table.
-CREATE TABLE transactions
-(
-    transaction_hash   String COMMENT 'Transaction hash',
-    signer_id          String COMMENT 'The account ID of the transaction signer',
-    tx_block_height    UInt64 COMMENT 'The block height when the transaction was included',
-    tx_block_hash      String COMMENT 'The block hash when the transaction was included',
-    tx_block_timestamp DateTime64(9, 'UTC') COMMENT 'The block timestamp in UTC when the transaction was included',
-    transaction        String COMMENT 'The JSON serialization of the transaction view without profiling and proofs',
-    last_block_height  UInt64 COMMENT 'The block height when the last receipt was processed for the transaction',
-
-    INDEX              signer_id_bloom_index signer_id TYPE bloom_filter() GRANULARITY 1,
-    INDEX              tx_block_height_minmax_idx tx_block_height TYPE minmax GRANULARITY 1,
-    INDEX              tx_block_timestamp_minmax_idx tx_block_timestamp TYPE minmax GRANULARITY 1,
-) ENGINE = ReplacingMergeTree
-PRIMARY KEY (transaction_hash)
-ORDER BY (transaction_hash)
-
-CREATE TABLE account_txs
-(
-    account_id         String COMMENT 'The account ID',
-    transaction_hash   String COMMENT 'The transaction hash',
-    signer_id          String COMMENT 'The account ID of the transaction signer',
-    tx_block_height    UInt64 COMMENT 'The block height when the transaction was included',
-    tx_block_timestamp DateTime64(9, 'UTC') COMMENT 'The block timestamp in UTC when the transaction was included',
-
-    INDEX              tx_block_timestamp_minmax_idx tx_block_timestamp TYPE minmax GRANULARITY 1,
-
-) ENGINE = ReplacingMergeTree
-PRIMARY KEY (account_id, tx_block_height)
-ORDER BY (account_id, tx_block_height, transaction_hash)
-
-CREATE TABLE block_txs
-(
-    block_height     UInt64 COMMENT 'The block height',
-    block_hash       String COMMENT 'The block hash',
-    block_timestamp  DateTime64(9, 'UTC') COMMENT 'The block timestamp in UTC',
-    transaction_hash String COMMENT 'The transaction hash',
-    signer_id        String COMMENT 'The account ID of the transaction signer',
-    tx_block_height  UInt64 COMMENT 'The block height when the transaction was included',
-
-    INDEX            block_timestamp_minmax_idx block_timestamp TYPE minmax GRANULARITY 1,
-) ENGINE = ReplacingMergeTree
-PRIMARY KEY (block_height)
-ORDER BY (block_height, transaction_hash)
-
-CREATE TABLE receipt_txs
-(
-    receipt_id         String COMMENT 'The receipt hash',
-    transaction_hash   String COMMENT 'The transaction hash',
-    signer_id          String COMMENT 'The account ID of the transaction signer',
-    tx_block_height    UInt64 COMMENT 'The block height when the transaction was included',
-    tx_block_timestamp DateTime64(9, 'UTC') COMMENT 'The block timestamp in UTC when the transaction was included',
-
-    INDEX              receipt_id_bloom_index receipt_id TYPE bloom_filter() GRANULARITY 1,
-    INDEX              tx_block_timestamp_minmax_idx tx_block_height TYPE minmax GRANULARITY 1,
-) ENGINE = ReplacingMergeTree
-PRIMARY KEY (tx_block_height)
-ORDER BY (tx_block_height, receipt_id)
-
-CREATE TABLE blocks
-(
-    block_height     UInt64 COMMENT 'The block height',
-    block_hash       String COMMENT 'The block hash',
-    block_timestamp  DateTime64(9, 'UTC') COMMENT 'The block timestamp in UTC',
-    prev_block_height Nullable(UInt64) COMMENT 'The previous block height',
-    epoch_id         String COMMENT 'The epoch ID',
-    chunks_included  UInt64 COMMENT 'The number of chunks included in the block',
-    prev_block_hash  String COMMENT 'The previous block hash',
-    author_id        String COMMENT 'The account ID of the block author',
-    signature        String COMMENT 'The block signature',
-    protocol_version UInt32 COMMENT 'The protocol version',
-
-    INDEX            block_timestamp_minmax_idx block_timestamp TYPE minmax GRANULARITY 1,
-    INDEX            author_id_bloom_index author_id TYPE bloom_filter() GRANULARITY 1,
-    INDEX            epoch_id_bloom_index epoch_id TYPE bloom_filter() GRANULARITY 1,
-    INDEX            block_hash_bloom_index block_hash TYPE bloom_filter() GRANULARITY 1,
-    INDEX            protocol_version_minmax_idx protocol_version TYPE minmax GRANULARITY 1,
-) ENGINE = ReplacingMergeTree
-PRIMARY KEY (block_height)
-ORDER BY (block_height)
+.
+├── config
+│  └── config.xml
+├── data (generated)
+├── db-schemas
+│  ├── actions-events-data.sql
+│  └── transactions-accounts-blocks-receipts.sql
+└── logs (generated)
+├── clickhouse-server.err.log
+└── clickhouse-server.log
 ```
+
+When troubleshooting, you may look at the bottom of the `clickhouse-server.err.log` file, which is set to log in `debug` mode for local development.
+
+## Connect to API
+
+The next step is to follow the README instructions for this FastNEAR repository:
+
+https://github.com/fastnear/explorer-api

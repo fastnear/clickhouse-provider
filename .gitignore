@@ -1,4 +1,9 @@
 /target
 .env*
 Cargo.lock
-res
+
+clickhouse-info/data/*
+!clickhouse-info/data/.gitkeep
+
+clickhouse-info/logs/*
+!clickhouse-info/logs/.gitkeep
