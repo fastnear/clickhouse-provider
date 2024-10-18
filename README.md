@@ -1,5 +1,18 @@
 ## Clickhouse Provider based on FASTNEAR's indexed neardata xyz
 
+### Example .env
+
+```
+DATABASE_URL=http://localhost:8123
+DATABASE_USER=default
+DATABASE_PASSWORD=password
+DATABASE_DATABASE=default
+NUM_FETCHING_THREADS=8
+CLICKHOUSE_SKIP_COMMIT=false
+COMMIT_EVERY_BLOCK=false
+CHAIN_ID=testnet
+```
+
 ### Create clickhouse table
 
 For generic action view:
