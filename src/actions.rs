@@ -353,7 +353,7 @@ pub fn extract_rows(msg: BlockWithTxHashes) -> Rows {
                 receiver_id: account_id,
                 receipt_id,
                 receipt,
-                priority,
+                priority: _priority,
             } = outcome.receipt;
             let tx_hash = outcome.tx_hash.expect("Tx Hash is not set").to_string();
             let predecessor_id = predecessor_id.to_string();
@@ -635,7 +635,7 @@ pub fn extract_rows(msg: BlockWithTxHashes) -> Rows {
                     receiver_id: account_id,
                     receipt_id,
                     receipt,
-                    priority,
+                    priority: _priority,
                 } = receipt_view;
                 match receipt {
                     ReceiptEnumView::Action { .. } => {
