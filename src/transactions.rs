@@ -249,6 +249,7 @@ impl TransactionsData {
                         ReceiptEnumView::Data { data_id, .. } => {
                             self.tx_cache.insert_data_receipt(&data_id, receipt);
                         }
+                        ReceiptEnumView::GlobalContractDistribution { .. } => {}
                     }
                 }
             }
@@ -325,6 +326,7 @@ impl TransactionsData {
                     ReceiptEnumView::Data { .. } => {
                         unreachable!("Data receipt should be processed before")
                     }
+                    ReceiptEnumView::GlobalContractDistribution { .. } => {}
                 };
 
                 let pending_receipt_ids = execution_outcome.outcome.receipt_ids.clone();
@@ -560,6 +562,7 @@ fn add_accounts_from_receipt(accounts: &mut HashSet<AccountId>, receipt: &views:
             }
         }
         ReceiptEnumView::Data { .. } => {}
+        ReceiptEnumView::GlobalContractDistribution { .. } => {}
     }
 }
 
@@ -613,6 +616,7 @@ impl TxCache {
             ReceiptEnumView::Data {
                 is_promise_resume, ..
             } => *is_promise_resume,
+            ReceiptEnumView::GlobalContractDistribution { .. } => false,
         };
         let old_receipt = self.data_receipts.insert(*data_id, receipt);
         // In-memory insert.
@@ -623,6 +627,7 @@ impl TxCache {
                     ReceiptEnumView::Data {
                         is_promise_resume, ..
                     } => *is_promise_resume,
+                    ReceiptEnumView::GlobalContractDistribution { .. } => false,
                 };
                 assert!(
                     is_promise_resume && old_is_promise_resume,

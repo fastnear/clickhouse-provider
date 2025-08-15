@@ -39,6 +39,10 @@ pub enum ActionKind {
     DeleteAccount = 8,
     Delegate = 9,
     NonrefundableStorageTransfer = 10,
+    DeployGlobalContract = 11,
+    DeployGlobalContractByAccountId = 12,
+    UseGlobalContract = 13,
+    UseGlobalContractByAccountId = 14,
 }
 
 #[derive(Row, Serialize)]
@@ -349,6 +353,7 @@ pub fn extract_rows(msg: BlockWithTxHashes) -> Rows {
                 receiver_id: account_id,
                 receipt_id,
                 receipt,
+                priority: _priority,
             } = outcome.receipt;
             let tx_hash = outcome.tx_hash.expect("Tx Hash is not set").to_string();
             let predecessor_id = predecessor_id.to_string();
@@ -485,9 +490,18 @@ pub fn extract_rows(msg: BlockWithTxHashes) -> Rows {
                                 ActionView::DeleteKey { .. } => ActionKind::DeleteKey,
                                 ActionView::DeleteAccount { .. } => ActionKind::DeleteAccount,
                                 ActionView::Delegate { .. } => ActionKind::Delegate,
-                                // ActionView::NonrefundableStorageTransfer { .. } => {
-                                //     ActionKind::NonrefundableStorageTransfer
-                                // }
+                                ActionView::DeployGlobalContract { .. } => {
+                                    ActionKind::DeployGlobalContract
+                                }
+                                ActionView::DeployGlobalContractByAccountId { .. } => {
+                                    ActionKind::DeployGlobalContractByAccountId
+                                }
+                                ActionView::UseGlobalContract { .. } => {
+                                    ActionKind::UseGlobalContract
+                                }
+                                ActionView::UseGlobalContractByAccountId { .. } => {
+                                    ActionKind::UseGlobalContractByAccountId
+                                }
                             },
                             action_json: serde_json::to_string(&action).unwrap(),
                             input_data_ids: input_data_ids
@@ -610,6 +624,7 @@ pub fn extract_rows(msg: BlockWithTxHashes) -> Rows {
                 ReceiptEnumView::Data { .. } => {
                     unreachable!("Data receipts don't have execution outcomes");
                 }
+                ReceiptEnumView::GlobalContractDistribution { .. } => {}
             }
         }
         // Extracting data receipts
@@ -620,6 +635,7 @@ pub fn extract_rows(msg: BlockWithTxHashes) -> Rows {
                     receiver_id: account_id,
                     receipt_id,
                     receipt,
+                    priority: _priority,
                 } = receipt_view;
                 match receipt {
                     ReceiptEnumView::Action { .. } => {
@@ -645,6 +661,7 @@ pub fn extract_rows(msg: BlockWithTxHashes) -> Rows {
                             .checked_add(1)
                             .expect("Receipt index overflow");
                     }
+                    ReceiptEnumView::GlobalContractDistribution { .. } => {}
                 }
             }
         }

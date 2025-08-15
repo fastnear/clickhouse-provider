@@ -51,6 +51,7 @@ async fn main() {
         .expect("NUM_FETCHING_THREADS is not set")
         .parse::<u64>()
         .expect("Invalid NUM_FETCHING_THREADS");
+    let auth_bearer_token = std::env::var("AUTH_BEARER_TOKEN").ok();
 
     let first_block_height = fetcher::fetch_first_block(&client, chain_id)
         .await
@@ -77,17 +78,14 @@ async fn main() {
             let last_block_height = backfill_block_height.unwrap_or(db_last_block_height);
             let start_block_height = first_block_height.max(last_block_height + 1);
             let (sender, receiver) = mpsc::channel(100);
-            let config = fetcher::FetcherConfig {
-                num_threads,
-                start_block_height,
-                chain_id,
-            };
-            tokio::spawn(fetcher::start_fetcher(
-                Some(client),
-                config,
-                sender,
-                is_running,
-            ));
+            let mut builder = fetcher::FetcherConfigBuilder::new()
+                .chain_id(chain_id)
+                .num_threads(num_threads)
+                .start_block_height(start_block_height);
+            if let Some(auth_bearer_token) = auth_bearer_token {
+                builder = builder.auth_bearer_token(auth_bearer_token);
+            }
+            tokio::spawn(fetcher::start_fetcher(builder.build(), sender, is_running));
             listen_blocks_for_actions(receiver, db, actions_data, last_block_height).await;
         }
         "transactions" => {
@@ -105,17 +103,14 @@ async fn main() {
 
             let start_block_height = first_block_height.max(start_block_height);
             let (sender, receiver) = mpsc::channel(100);
-            let config = fetcher::FetcherConfig {
-                num_threads,
-                start_block_height,
-                chain_id,
-            };
-            tokio::spawn(fetcher::start_fetcher(
-                Some(client),
-                config,
-                sender,
-                is_running,
-            ));
+            let mut builder = fetcher::FetcherConfigBuilder::new()
+                .chain_id(chain_id)
+                .num_threads(num_threads)
+                .start_block_height(start_block_height);
+            if let Some(auth_bearer_token) = auth_bearer_token {
+                builder = builder.auth_bearer_token(auth_bearer_token);
+            }
+            tokio::spawn(fetcher::start_fetcher(builder.build(), sender, is_running));
             listen_blocks_for_transactions(receiver, db, transactions_data, last_block_height)
                 .await;
         }
