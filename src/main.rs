@@ -13,6 +13,7 @@ use std::sync::Arc;
 use dotenv::dotenv;
 use fastnear_neardata_fetcher::fetcher;
 use fastnear_primitives::block_with_tx_hash::*;
+use fastnear_primitives::near_primitives::types::BlockHeight;
 use fastnear_primitives::types::ChainId;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
@@ -78,9 +79,13 @@ async fn main() {
         .get(1)
         .map(|arg| arg.as_str())
         .expect("You need to provide a command");
-    let backfill_block_height = args
+    let backfill_block_height: Option<BlockHeight> = args
         .get(2)
         .map(|v| v.parse().expect("Failed to parse backfill block height"));
+    let end_backfill_block_height: Option<BlockHeight> = args.get(3).map(|v| {
+        v.parse()
+            .expect("Failed to parse end backfill block height")
+    });
 
     match command {
         "actions" => {
@@ -100,17 +105,12 @@ async fn main() {
             listen_blocks_for_actions(receiver, db, actions_data, last_block_height).await;
         }
         "transactions" => {
-            let mut transactions_data = TransactionsData::new();
+            let mut transactions_data = TransactionsData::new(end_backfill_block_height.is_some());
             let db_last_block_height = transactions_data.last_block_height(&db).await;
             let last_block_height = backfill_block_height.unwrap_or(db_last_block_height);
-            let is_cache_ready = transactions_data.is_cache_ready(last_block_height);
-            tracing::log::info!(target: PROJECT_ID, "Last block height: {}. Cache is ready: {}", last_block_height, is_cache_ready);
+            tracing::log::info!(target: PROJECT_ID, "Last block height: {}", last_block_height);
 
-            let start_block_height = if is_cache_ready {
-                last_block_height + 1
-            } else {
-                last_block_height.saturating_sub(SAFE_CATCH_UP_OFFSET)
-            };
+            let start_block_height = last_block_height.saturating_sub(SAFE_CATCH_UP_OFFSET);
 
             let start_block_height = first_block_height.max(start_block_height);
             let (sender, receiver) = mpsc::channel(100);
@@ -118,6 +118,9 @@ async fn main() {
                 .chain_id(chain_id)
                 .num_threads(num_threads)
                 .start_block_height(start_block_height);
+            if let Some(end_backfill_block_height) = end_backfill_block_height {
+                builder = builder.end_block_height(end_backfill_block_height - 1);
+            }
             if let Some(auth_bearer_token) = auth_bearer_token {
                 builder = builder.auth_bearer_token(auth_bearer_token);
             }

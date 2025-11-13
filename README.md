@@ -254,72 +254,95 @@ CREATE TABLE transactions
     transaction_hash   String COMMENT 'Transaction hash',
     signer_id          String COMMENT 'The account ID of the transaction signer',
     tx_block_height    UInt64 COMMENT 'The block height when the transaction was included',
+    tx_index           UInt32 COMMENT 'The index of the transaction in the block',
     tx_block_hash      String COMMENT 'The block hash when the transaction was included',
     tx_block_timestamp DateTime64(9, 'UTC') COMMENT 'The block timestamp in UTC when the transaction was included',
-    transaction        String COMMENT 'The JSON serialization of the transaction view without profiling and proofs',
     last_block_height  UInt64 COMMENT 'The block height when the last receipt was processed for the transaction',
+    is_completed       Bool COMMENT 'Whether the transaction has all the data or still pending some receipts',
+    shard_id           Uint64 COMMENT 'The shard ID where the transaction was included',
+    receiver_id        String COMMENT 'The account ID of the transaction receiver',
+    signer_public_key  String COMMENT 'The public key of the transaction signer',
+    priority_fee       UInt64 COMMENT 'The priority fee of the transaction',
+    nonce              UInt64 COMMENT 'The nonce of the transaction',
+    is_relayed         Bool COMMENT 'Whether the transaction is relayed or not',
+    real_signer_id     String COMMENT 'The account ID of the signer of the delegated transaction action, if applicable. Otherwise same as signer_id',
+    real_receiver_id   String COMMENT 'The account ID of the receiver of the delegated transaction action, if applicable. Otherwise same as receiver_id',
+    is_success         Bool COMMENT 'Whether the transaction execution was successful or not. Pending transactions are considered not successful',
 
+    INDEX              transaction_hash_bloom_index transaction_hash TYPE bloom_filter() GRANULARITY 1,
     INDEX              signer_id_bloom_index signer_id TYPE bloom_filter() GRANULARITY 1,
     INDEX              tx_block_height_minmax_idx tx_block_height TYPE minmax GRANULARITY 1,
     INDEX              tx_block_timestamp_minmax_idx tx_block_timestamp TYPE minmax GRANULARITY 1,
 ) ENGINE = ReplacingMergeTree
-PRIMARY KEY (transaction_hash)
-ORDER BY (transaction_hash)
+PRIMARY KEY (tx_block_height)
+ORDER BY (tx_block_height, tx_index)
 
 CREATE TABLE account_txs
 (
-    account_id         String COMMENT 'The account ID',
-    transaction_hash   String COMMENT 'The transaction hash',
-    signer_id          String COMMENT 'The account ID of the transaction signer',
-    tx_block_height    UInt64 COMMENT 'The block height when the transaction was included',
-    tx_block_timestamp DateTime64(9, 'UTC') COMMENT 'The block timestamp in UTC when the transaction was included',
+    account_id          String COMMENT 'The account ID',
+    transaction_hash    String COMMENT 'The transaction hash',
+    tx_block_height     UInt64 COMMENT 'The block height when the transaction was included into the blockchain',
+    tx_block_timestamp  DateTime64(9, 'UTC') COMMENT 'The block timestamp in UTC when the transaction was included',
+    tx_index            UInt32 COMMENT 'The index of the transaction in the block',
+    is_signer           Bool COMMENT 'True if the account signed the transaction',
+    is_delegated_signer Bool COMMENT 'True if the account was the signer of the delegated transaction action',
+    is_real_signer      Bool COMMENT 'True if the account was the real signer of the transaction (either direct or delegated, excluding relayer signer)',
+    is_any_signer       Bool COMMENT 'True if the account was the signer of the delegated transaction action or the signer of the transaction',
+    is_predecessor      Bool COMMENT 'True if the account was the predecessor of the receipt',
+    is_receiver         Bool COMMENT 'True if the account was the receiver of the receipt',
+    is_real_receiver    Bool COMMENT 'True if the account was the receiver of the receipt (excluding relayer receiver and gas refunds)',
+    is_function_call    Bool COMMENT 'True if the account was the target of a function call action',
+    is_action_arg       Bool COMMENT 'True if the account was involved in action arguments',
+    is_event_log        Bool COMMENT 'True if the account was involved in JSON event logs',
+    is_success          Bool COMMENT 'Whether the transaction execution was successful or not. Pending transactions are considered not successful',
 
-    INDEX              tx_block_timestamp_minmax_idx tx_block_timestamp TYPE minmax GRANULARITY 1,
+    INDEX               tx_block_timestamp_minmax_idx tx_block_timestamp TYPE minmax GRANULARITY 1,
+    INDEX               tx_block_height_minmax_idx tx_block_height TYPE minmax GRANULARITY 1,
 
 ) ENGINE = ReplacingMergeTree
 PRIMARY KEY (account_id, tx_block_height)
-ORDER BY (account_id, tx_block_height, transaction_hash)
-
-CREATE TABLE block_txs
-(
-    block_height     UInt64 COMMENT 'The block height',
-    block_hash       String COMMENT 'The block hash',
-    block_timestamp  DateTime64(9, 'UTC') COMMENT 'The block timestamp in UTC',
-    transaction_hash String COMMENT 'The transaction hash',
-    signer_id        String COMMENT 'The account ID of the transaction signer',
-    tx_block_height  UInt64 COMMENT 'The block height when the transaction was included',
-
-    INDEX            block_timestamp_minmax_idx block_timestamp TYPE minmax GRANULARITY 1,
-) ENGINE = ReplacingMergeTree
-PRIMARY KEY (block_height)
-ORDER BY (block_height, transaction_hash)
+ORDER BY (account_id, tx_block_height, tx_index)
 
 CREATE TABLE receipt_txs
 (
-    receipt_id         String COMMENT 'The receipt hash',
-    transaction_hash   String COMMENT 'The transaction hash',
-    signer_id          String COMMENT 'The account ID of the transaction signer',
-    tx_block_height    UInt64 COMMENT 'The block height when the transaction was included',
-    tx_block_timestamp DateTime64(9, 'UTC') COMMENT 'The block timestamp in UTC when the transaction was included',
+    receipt_id           String COMMENT 'The receipt hash',
+    receipt_block_height UInt64 COMMENT 'The block height when the receipt was executed',
+    receipt_index        UInt32 COMMENT 'Index of the receipt that was executed in the block across all shards',
+    appear_block_height  UInt64 COMMENT 'The block height when the receipt first appeared (e.g. data receipts appear earlier)',
+    appear_receipt_index UInt32 COMMENT 'Index of the receipt that first appeared in the block across all shards',
+    transaction_hash     String COMMENT 'The transaction hash',
+    tx_block_height      UInt64 COMMENT 'The block height when the transaction was included',
+    tx_block_timestamp   DateTime64(9, 'UTC') COMMENT 'The block timestamp in UTC when the transaction was included',
+    tx_index             UInt32 COMMENT 'The index of the transaction in the block',
+    predecessor_id       String COMMENT 'The account ID of the receipt predecessor',
+    receiver_id          String COMMENT 'The account ID of where the receipt is executed',
+    receipt_type         LowCardinality(String) COMMENT 'The type of the receipt: Action, Data, GlobalContractDistribution',
+    priority             Uint64 COMMENT 'The priority of the receipt',
+    shard_id             Uint64 COMMENT 'The shard ID where the receipt was executed',
 
-    INDEX              receipt_id_bloom_index receipt_id TYPE bloom_filter() GRANULARITY 1,
-    INDEX              tx_block_timestamp_minmax_idx tx_block_height TYPE minmax GRANULARITY 1,
+    INDEX                receipt_id_bloom_index receipt_id TYPE bloom_filter() GRANULARITY 1,
+    INDEX                tx_block_timestamp_minmax_idx tx_block_height TYPE minmax GRANULARITY 1,
 ) ENGINE = ReplacingMergeTree
-PRIMARY KEY (tx_block_height)
-ORDER BY (tx_block_height, receipt_id)
+PRIMARY KEY (receipt_block_height, receipt_index)
+ORDER BY (receipt_block_height, receipt_index, receipt_id)
 
 CREATE TABLE blocks
 (
     block_height      UInt64 COMMENT 'The block height',
-    block_hash        String COMMENT 'The block hash',
-    block_timestamp   DateTime64(9, 'UTC') COMMENT 'The block timestamp in UTC',
     prev_block_height Nullable(UInt64) COMMENT 'The previous block height',
-    epoch_id          String COMMENT 'The epoch ID',
-    chunks_included   UInt64 COMMENT 'The number of chunks included in the block',
+    block_hash        String COMMENT 'The block hash',
     prev_block_hash   String COMMENT 'The previous block hash',
+    block_timestamp   DateTime64(9, 'UTC') COMMENT 'The block timestamp in UTC',
+    epoch_id          String COMMENT 'The epoch ID',
+    next_epoch_id     String COMMENT 'The next epoch ID',
+    chunks_included   UInt64 COMMENT 'The number of chunks included in the block',
     author_id         String COMMENT 'The account ID of the block author',
-    signature         String COMMENT 'The block signature',
     protocol_version  UInt32 COMMENT 'The protocol version',
+    gas_price         UInt128 COMMENT 'The gas price in yoctoNEAR',
+    block_ordinal     Nullable(UInt64) COMMENT 'The block ordinal in the chain',
+    total_supply      UInt128 COMMENT 'The total supply in yoctoNEAR at this block',
+    num_transactions  UInt32 COMMENT 'The number of transactions in the block (executed)',
+    num_receipts      UInt32 COMMENT 'The number of receipts in the block (executed or used)',
 
     INDEX             block_timestamp_minmax_idx block_timestamp TYPE minmax GRANULARITY 1,
     INDEX             author_id_bloom_index author_id TYPE bloom_filter() GRANULARITY 1,
