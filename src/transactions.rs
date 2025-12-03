@@ -1,21 +1,15 @@
+use crate::types::*;
 use crate::*;
-use clickhouse::Row;
 use fastnear_primitives::near_indexer_primitives::views::ExecutionStatusView;
 use fastnear_primitives::near_indexer_primitives::IndexerTransactionWithOutcome;
 use fastnear_primitives::near_primitives::hash::CryptoHash;
 use fastnear_primitives::near_primitives::types::{AccountId, BlockHeight};
-use fastnear_primitives::near_primitives::views::{
-    ActionView, ReceiptEnumView, SignedTransactionView,
-};
-use std::cmp::PartialEq;
-use std::collections::HashMap;
+use fastnear_primitives::near_primitives::views::{ActionView, ReceiptEnumView};
+
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::{env, mem};
 
-use crate::types::{
-    BlockInfo, ImprovedExecutionOutcome, ImprovedExecutionOutcomeWithReceipt, ImprovedReceiptView,
-};
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 const EVENT_JSON_PREFIX: &str = "EVENT_JSON:";
@@ -43,7 +37,7 @@ const POTENTIAL_ACCOUNT_ARGS: [&str; 19] = [
     "owner_account_id",
 ];
 
-const POTENTIAL_EVENTS_ARGS: [&str; 10] = [
+const POTENTIAL_EVENTS_ARGS: [&str; 11] = [
     "account_id",
     "owner_id",
     "old_owner_id",
@@ -54,281 +48,8 @@ const POTENTIAL_EVENTS_ARGS: [&str; 10] = [
     "liquidation_account_id",
     "contract_id",
     "nft_contract_id",
+    "receiver_id",
 ];
-
-#[allow(dead_code)]
-#[derive(Deserialize)]
-pub struct EventJson {
-    pub version: String,
-    pub standard: String,
-    pub event: String,
-    pub data: Vec<Value>,
-}
-
-/*
-   transaction_hash   String COMMENT 'Transaction hash',
-   signer_id          String COMMENT 'The account ID of the transaction signer',
-   tx_block_height    UInt64 COMMENT 'The block height when the transaction was included',
-   tx_index           UInt32 COMMENT 'The index of the transaction in the block',
-   tx_block_hash      String COMMENT 'The block hash when the transaction was included',
-   tx_block_timestamp DateTime64(9, 'UTC') COMMENT 'The block timestamp in UTC when the transaction was included',
-   last_block_height  UInt64 COMMENT 'The block height when the last receipt was processed for the transaction',
-   is_completed       Bool COMMENT 'Whether the transaction has all the data or still pending some receipts',
-   shard_id           Uint64 COMMENT 'The shard ID where the transaction was included',
-   receiver_id        String COMMENT 'The account ID of the transaction receiver',
-   signer_public_key  String COMMENT 'The public key of the transaction signer',
-   priority_fee       UInt64 COMMENT 'The priority fee of the transaction',
-   nonce              UInt64 COMMENT 'The nonce of the transaction',
-   is_relayed         Bool COMMENT 'Whether the transaction is relayed or not',
-   real_signer_id     String COMMENT 'The account ID of the signer of the delegated transaction action, if applicable. Otherwise same as signer_id',
-   real_receiver_id   String COMMENT 'The account ID of the receiver of the delegated transaction action, if applicable. Otherwise same as receiver_id',
-   is_success         Bool COMMENT 'Whether the transaction execution was successful or not. Pending transactions are considered not successful',
-*/
-#[derive(Row, Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct TransactionRow {
-    pub transaction_hash: String,
-    pub signer_id: String,
-    pub tx_block_height: u64,
-    pub tx_index: u32,
-    pub tx_block_hash: String,
-    pub tx_block_timestamp: u64,
-    pub last_block_height: u64,
-    pub is_completed: bool,
-    pub shard_id: u64,
-    pub receiver_id: String,
-    pub signer_public_key: String,
-    pub priority_fee: u64,
-    pub nonce: u64,
-    pub is_relayed: bool,
-    pub real_signer_id: String,
-    pub real_receiver_id: String,
-    pub is_success: bool,
-}
-
-/*
-   account_id          String COMMENT 'The account ID',
-   transaction_hash    String COMMENT 'The transaction hash',
-   tx_block_height     UInt64 COMMENT 'The block height when the transaction was included into the blockchain',
-   tx_block_timestamp  DateTime64(9, 'UTC') COMMENT 'The block timestamp in UTC when the transaction was included',
-   tx_index            UInt32 COMMENT 'The index of the transaction in the block',
-   is_signer           Bool COMMENT 'True if the account signed the transaction',
-   is_delegated_signer Bool COMMENT 'True if the account was the signer of the delegated transaction action',
-   is_real_signer      Bool COMMENT 'True if the account was the real signer of the transaction (either direct or delegated, excluding relayer signer)',
-   is_any_signer       Bool COMMENT 'True if the account was the signer of the delegated transaction action or the signer of the transaction',
-   is_predecessor      Bool COMMENT 'True if the account was the predecessor of the receipt',
-   is_receiver         Bool COMMENT 'True if the account was the receiver of the receipt',
-   is_real_receiver    Bool COMMENT 'True if the account was the receiver of the receipt (excluding relayer receiver and gas refunds)',
-   is_function_call    Bool COMMENT 'True if the account was the target of a function call action',
-   is_action_arg       Bool COMMENT 'True if the account was involved in action arguments',
-   is_event_log        Bool COMMENT 'True if the account was involved in JSON event logs',
-   is_success          Bool COMMENT 'Whether the transaction execution was successful or not. Pending transactions are considered not successful',
-*/
-#[derive(Row, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
-pub struct AccountTxRow {
-    pub account_id: String,
-    pub transaction_hash: String,
-    pub tx_block_height: u64,
-    pub tx_block_timestamp: u64,
-    pub tx_index: u32,
-    pub is_signer: bool,
-    pub is_delegated_signer: bool,
-    pub is_real_signer: bool,
-    pub is_any_signer: bool,
-    pub is_predecessor: bool,
-    pub is_receiver: bool,
-    pub is_real_receiver: bool,
-    pub is_function_call: bool,
-    pub is_action_arg: bool,
-    pub is_event_log: bool,
-    pub is_success: bool,
-}
-
-impl AccountTxRow {
-    pub fn set_signer(&mut self) -> &mut Self {
-        self.is_signer = true;
-        self
-    }
-
-    pub fn set_delegated_signer(&mut self) -> &mut Self {
-        self.is_delegated_signer = true;
-        self
-    }
-
-    pub fn set_real_signer(&mut self) -> &mut Self {
-        self.is_real_signer = true;
-        self
-    }
-
-    pub fn set_any_signer(&mut self) -> &mut Self {
-        self.is_any_signer = true;
-        self
-    }
-
-    pub fn set_predecessor(&mut self) -> &mut Self {
-        self.is_predecessor = true;
-        self
-    }
-
-    pub fn set_receiver(&mut self) -> &mut Self {
-        self.is_receiver = true;
-        self
-    }
-
-    pub fn set_real_receiver(&mut self) -> &mut Self {
-        self.is_real_receiver = true;
-        self
-    }
-
-    pub fn set_function_call(&mut self) -> &mut Self {
-        self.is_function_call = true;
-        self
-    }
-
-    pub fn set_action_arg(&mut self) -> &mut Self {
-        self.is_action_arg = true;
-        self
-    }
-
-    pub fn set_event_log(&mut self) -> &mut Self {
-        self.is_event_log = true;
-        self
-    }
-}
-
-/*
-   receipt_id           String COMMENT 'The receipt hash',
-   receipt_block_height UInt64 COMMENT 'The block height when the receipt was executed',
-   receipt_index        UInt32 COMMENT 'Index of the receipt that appears in the block across all shards',
-   appear_block_height  UInt64 COMMENT 'The block height when the receipt first appeared (e.g. data receipts appear earlier)',
-   appear_receipt_index UInt32 COMMENT 'Index of the receipt that first appeared in the block across all shards',
-   transaction_hash     String COMMENT 'The transaction hash',
-   tx_block_height      UInt64 COMMENT 'The block height when the transaction was included',
-   tx_block_timestamp   DateTime64(9, 'UTC') COMMENT 'The block timestamp in UTC when the transaction was included',
-   tx_index             UInt32 COMMENT 'The index of the transaction in the block',
-   predecessor_id       String COMMENT 'The account ID of the receipt predecessor',
-   receiver_id          String COMMENT 'The account ID of where the receipt is executed',
-   receipt_type         LowCardinality(String) COMMENT 'The type of the receipt: Action, Data, GlobalContractDistribution',
-   priority             Uint64 COMMENT 'The priority of the receipt',
-   shard_id           Uint64 COMMENT 'The shard ID where the receipt was included',
-*/
-#[derive(Row, Serialize, Deserialize, Clone, Debug)]
-pub struct ReceiptTxRow {
-    pub receipt_id: String,
-    pub receipt_block_height: u64,
-    pub receipt_index: u32,
-    pub appear_block_height: u64,
-    pub appear_receipt_index: u32,
-    pub transaction_hash: String,
-    pub tx_block_height: u64,
-    pub tx_block_timestamp: u64,
-    pub tx_index: u32,
-    pub predecessor_id: String,
-    pub receiver_id: String,
-    pub receipt_type: String,
-    pub priority: u64,
-    pub shard_id: u64,
-}
-
-impl ReceiptTxRow {
-    pub fn new(
-        receipt: &ImprovedReceiptView,
-        receipt_index: u32,
-        pending_transaction: &PendingTransaction,
-        block_info: &BlockInfo,
-        shard_id: u64,
-    ) -> Self {
-        let receipt_type = match &receipt.receipt {
-            ReceiptEnumView::Action { .. } => "Action",
-            ReceiptEnumView::Data { .. } => "Data",
-            ReceiptEnumView::GlobalContractDistribution { .. } => "GlobalContractDistribution",
-        }
-        .to_string();
-        Self {
-            receipt_id: receipt.receipt_id.to_string(),
-            receipt_block_height: block_info.block_height,
-            receipt_index,
-            appear_block_height: receipt.block_height,
-            appear_receipt_index: receipt.receipt_index,
-            transaction_hash: pending_transaction.transaction_hash().to_string(),
-            tx_block_height: pending_transaction.tx_block_height,
-            tx_block_timestamp: pending_transaction.tx_block_timestamp,
-            tx_index: pending_transaction.tx_index,
-            predecessor_id: receipt.predecessor_id.to_string(),
-            receiver_id: receipt.receiver_id.to_string(),
-            receipt_type,
-            priority: receipt.priority,
-            shard_id,
-        }
-    }
-}
-
-/*
-   block_height      UInt64 COMMENT 'The block height',
-   prev_block_height Nullable(UInt64) COMMENT 'The previous block height',
-   block_hash        String COMMENT 'The block hash',
-   prev_block_hash   String COMMENT 'The previous block hash',
-   block_timestamp   DateTime64(9, 'UTC') COMMENT 'The block timestamp in UTC',
-   epoch_id          String COMMENT 'The epoch ID',
-   next_epoch_id     String COMMENT 'The next epoch ID',
-   chunks_included   UInt64 COMMENT 'The number of chunks included in the block',
-   author_id         String COMMENT 'The account ID of the block author',
-   protocol_version  UInt32 COMMENT 'The protocol version',
-   gas_price         UInt128 COMMENT 'The gas price in yoctoNEAR',
-   block_ordinal     Nullable(UInt64) COMMENT 'The block ordinal in the chain',
-   total_supply      UInt128 COMMENT 'The total supply in yoctoNEAR at this block',
-   num_transactions  UInt32 COMMENT 'The number of transactions in the block (executed)',
-   num_receipts      UInt32 COMMENT 'The number of receipts in the block (executed or used)',
-*/
-#[derive(Row, Serialize, Deserialize, Clone, Debug)]
-pub struct BlockRow {
-    pub block_height: u64,
-    pub prev_block_height: Option<u64>,
-    pub block_hash: String,
-    pub prev_block_hash: String,
-    pub block_timestamp: u64,
-    pub epoch_id: String,
-    pub next_epoch_id: String,
-    pub chunks_included: u64,
-    pub author_id: String,
-    pub protocol_version: u32,
-    pub gas_price: u128,
-    pub block_ordinal: Option<u64>,
-    pub total_supply: u128,
-    pub num_transactions: u32,
-    pub num_receipts: u32,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct TransactionView {
-    pub transaction: SignedTransactionView,
-    pub execution_outcome: ImprovedExecutionOutcome,
-    pub receipts: Vec<ImprovedExecutionOutcomeWithReceipt>,
-    pub data_receipts: Vec<ImprovedReceiptView>,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
-pub struct Accounts(pub HashMap<String, AccountTxRow>);
-
-impl Accounts {
-    pub fn row(&mut self, account_id: &str) -> &mut AccountTxRow {
-        self.0.entry(account_id.to_string()).or_default()
-    }
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct PendingTransaction {
-    pub tx_block_height: BlockHeight,
-    pub tx_block_hash: CryptoHash,
-    pub tx_block_timestamp: u64,
-    pub tx_index: u32,
-    pub shard_id: u64,
-    pub last_block_height: BlockHeight,
-    pub transaction: TransactionView,
-    pub pending_receipt_ids: Vec<CryptoHash>,
-
-    pub committed_tx_row: Option<TransactionRow>,
-    pub committed_account_tx_rows: Accounts,
-}
 
 #[derive(Default)]
 pub struct TxRows {
@@ -351,10 +72,12 @@ pub struct TransactionsData {
     pub tx_cache: TxCache,
     pub rows: TxRows,
     pub commit_handlers: Vec<tokio::task::JoinHandle<Result<(), anyhow::Error>>>,
+    pub garage: Arc<aws_sdk_s3::Client>,
+    pub db: Arc<ClickDB>,
 }
 
 impl TransactionsData {
-    pub fn new(is_backfill: bool) -> Self {
+    pub fn new(is_backfill: bool, garage: Arc<aws_sdk_s3::Client>, db: Arc<ClickDB>) -> Self {
         let commit_every_block = env::var("COMMIT_EVERY_BLOCK")
             .map(|v| v == "true")
             .unwrap_or(false);
@@ -366,12 +89,13 @@ impl TransactionsData {
             tx_cache,
             rows: TxRows::default(),
             commit_handlers: vec![],
+            garage,
+            db,
         }
     }
 
     pub async fn process_block(
         &mut self,
-        db: &ClickDB,
         block: BlockWithTxHashes,
         last_db_block_height: BlockHeight,
         prev_block_hash: Option<CryptoHash>,
@@ -402,18 +126,20 @@ impl TransactionsData {
             prev_block_hash: block.block.header.prev_hash.to_string(),
             author_id: block.block.author.to_string(),
             protocol_version: block.block.header.latest_protocol_version,
-            gas_price: block.block.header.gas_price,
+            gas_price: block.block.header.gas_price.as_yoctonear(),
             block_ordinal: block.block.header.block_ordinal,
-            total_supply: block.block.header.total_supply,
+            total_supply: block.block.header.total_supply.as_yoctonear(),
             num_transactions: 0,
             num_receipts: 0,
+            gas_burnt: 0,
+            tokens_burnt: 0,
         };
 
         let mut pending_receipt_txs = vec![];
 
         let catching_up = block_height <= last_db_block_height;
 
-        let mut transactions_to_commit = vec![];
+        let mut transactions_to_commit = HashSet::new();
         let mut tx_index = 0u32;
         let mut appear_receipt_index = 0u32;
         let mut receipt_index = 0u32;
@@ -422,6 +148,8 @@ impl TransactionsData {
         for shard in &mut shards {
             if let Some(chunk) = shard.chunk.take() {
                 let shard_id: u64 = chunk.header.shard_id.into();
+                block_row.gas_burnt += chunk.header.gas_used.as_gas();
+                block_row.tokens_burnt += chunk.header.balance_burnt.as_yoctonear();
                 for IndexerTransactionWithOutcome {
                     transaction,
                     outcome,
@@ -455,7 +183,7 @@ impl TransactionsData {
                     self.tx_cache
                         .insert_transaction(pending_transaction, &pending_receipt_ids);
                 }
-                for receipt in chunk.receipts {
+                for receipt in chunk.local_receipts.into_iter().chain(chunk.receipts) {
                     let receipt = ImprovedReceiptView::from_receipt(
                         receipt,
                         appear_receipt_index,
@@ -508,13 +236,18 @@ impl TransactionsData {
                     .tx_cache
                     .remove_action_receipt(&receipt_id)
                     .expect("Missing action receipt");
-                let mut pending_transaction = self
-                    .tx_cache
-                    .get_and_remove_transaction(&tx_hash)
-                    .expect("Missing transaction for receipt");
+                let pending_transaction = self.tx_cache.get_and_remove_transaction(&tx_hash);
+                if pending_transaction.is_none() {
+                    panic!(
+                        "Missing pending transaction for receipt_id {} tx_hash {} at block {}",
+                        receipt_id, tx_hash, block_height
+                    );
+                }
+                let mut pending_transaction = pending_transaction.unwrap();
                 pending_transaction
                     .pending_receipt_ids
                     .retain(|r| r != &receipt_id);
+                pending_transaction.last_block_height = block_height;
 
                 // Extracting matching data receipts
                 match &receipt.receipt {
@@ -544,6 +277,7 @@ impl TransactionsData {
                                     &pending_transaction,
                                     &block_info,
                                     shard_id,
+                                    true,
                                 ));
 
                                 pending_transaction
@@ -578,6 +312,13 @@ impl TransactionsData {
                     &pending_transaction,
                     &block_info,
                     shard_id,
+                    matches!(
+                        execution_outcome.outcome.status,
+                        ExecutionStatusView::SuccessValue(_)
+                    ) || matches!(
+                        execution_outcome.outcome.status,
+                        ExecutionStatusView::SuccessReceiptId(_)
+                    ),
                 ));
                 receipt_index += 1;
                 let pending_receipt_ids = execution_outcome.outcome.receipt_ids.clone();
@@ -595,13 +336,14 @@ impl TransactionsData {
                 pending_transaction
                     .pending_receipt_ids
                     .extend(pending_receipt_ids.clone());
-                if (self.is_backfill || catching_up)
-                    && !pending_transaction.pending_receipt_ids.is_empty()
+                if !(self.is_backfill || catching_up)
+                    || pending_transaction.pending_receipt_ids.is_empty()
                 {
+                    transactions_to_commit.insert(pending_transaction.transaction_hash());
+                }
+                if !catching_up || !pending_transaction.pending_receipt_ids.is_empty() {
                     self.tx_cache
                         .insert_transaction(pending_transaction, &pending_receipt_ids);
-                } else {
-                    transactions_to_commit.push((pending_transaction, pending_receipt_ids));
                 }
             }
         }
@@ -615,16 +357,19 @@ impl TransactionsData {
         if !catching_up {
             self.rows.receipt_txs.extend(pending_receipt_txs);
             self.rows.blocks.push(block_row);
-            for (mut transaction, pending_receipt_ids) in transactions_to_commit {
+            for tx_hash in transactions_to_commit {
+                let mut transaction = self
+                    .tx_cache
+                    .get_and_remove_transaction(&tx_hash)
+                    .expect("Missing pending transaction to commit");
                 self.process_transaction(&mut transaction);
                 if !transaction.pending_receipt_ids.is_empty() {
-                    self.tx_cache
-                        .insert_transaction(transaction, &pending_receipt_ids);
+                    self.tx_cache.insert_transaction(transaction, &[]);
                 }
             }
         }
 
-        self.maybe_commit(db, block_height).await?;
+        self.maybe_commit(block_height).await?;
 
         Ok(block_hash)
     }
@@ -695,7 +440,7 @@ impl TransactionsData {
         };
 
         let mut accounts = transaction.committed_account_tx_rows.clone();
-        let tx_row = TransactionRow {
+        let mut tx_row = TransactionRow {
             transaction_hash: transaction.transaction_hash().to_string(),
             signer_id: signer_id.clone(),
             tx_block_height: transaction.tx_block_height,
@@ -719,6 +464,8 @@ impl TransactionsData {
                 .unwrap_or(&receiver_id)
                 .to_string(),
             is_success,
+            gas_burnt: 0,
+            tokens_burnt: 0,
         };
         if let Some(delegate_signer_id) = delegate_signer_id {
             accounts
@@ -730,15 +477,22 @@ impl TransactionsData {
         accounts.row(&tx_row.real_receiver_id).set_real_receiver();
         accounts.row(&tx_row.real_signer_id).set_real_signer();
 
+        for receipt in &transaction.transaction.receipts {
+            add_accounts_from_receipt(&mut accounts, &receipt.receipt);
+            add_accounts_from_logs(&mut accounts, &receipt.execution_outcome.outcome.logs);
+            tx_row.gas_burnt += receipt.execution_outcome.outcome.gas_burnt.as_gas();
+            tx_row.tokens_burnt += receipt
+                .execution_outcome
+                .outcome
+                .tokens_burnt
+                .as_yoctonear();
+        }
+
         if transaction.committed_tx_row.as_ref() != Some(&tx_row) {
             self.rows.tx_rows.push(tx_row.clone());
             transaction.committed_tx_row = Some(tx_row);
         }
 
-        for receipt in &transaction.transaction.receipts {
-            add_accounts_from_receipt(&mut accounts, &receipt.receipt);
-            add_accounts_from_logs(&mut accounts, &receipt.execution_outcome.outcome.logs);
-        }
         if is_success {
             for row in accounts.0.values_mut() {
                 row.is_success = true;
@@ -765,11 +519,7 @@ impl TransactionsData {
         ));
     }
 
-    pub async fn maybe_commit(
-        &mut self,
-        db: &ClickDB,
-        block_height: BlockHeight,
-    ) -> anyhow::Result<()> {
+    pub async fn maybe_commit(&mut self, block_height: BlockHeight) -> anyhow::Result<()> {
         let is_round_block = block_height % SAVE_STEP == 0;
         if is_round_block {
             tracing::log::info!(
@@ -783,14 +533,15 @@ impl TransactionsData {
                 self.rows.transactions.len()
             );
         }
-        if self.rows.tx_rows.len() >= db.min_batch || is_round_block || self.commit_every_block {
-            self.commit(db).await?;
+        if self.rows.tx_rows.len() >= self.db.min_batch || is_round_block || self.commit_every_block
+        {
+            self.commit().await?;
         }
 
         Ok(())
     }
 
-    pub async fn commit(&mut self, db: &ClickDB) -> anyhow::Result<()> {
+    pub async fn commit(&mut self) -> anyhow::Result<()> {
         let mut rows = TxRows::default();
         std::mem::swap(&mut rows, &mut self.rows);
         let max_commit_handlers = if self.is_backfill {
@@ -801,12 +552,12 @@ impl TransactionsData {
         while self.commit_handlers.len() >= max_commit_handlers {
             self.commit_handlers.remove(0).await??;
         }
-        let db = db.clone();
-        let garage = self.garage_client.clone();
+        let db = self.db.clone();
+        // let garage = self.garage_client.clone();
         let handler = tokio::spawn(async move {
             if !rows.transactions.is_empty() {
                 // Commit to garage first
-                insert_transactions_to_s3(&db.client, &rows.transactions).await?;
+                // TODO: insert_transactions_to_s3(&db.client, &rows.transactions).await?;
             }
             if !rows.tx_rows.is_empty() {
                 insert_rows_with_retry(&db.client, &rows.tx_rows, "transactions").await?;
@@ -835,8 +586,8 @@ impl TransactionsData {
         Ok(())
     }
 
-    pub async fn last_block_height(&mut self, db: &ClickDB) -> BlockHeight {
-        db.max("block_height", "blocks").await.unwrap_or(0)
+    pub async fn last_block_height(&self) -> BlockHeight {
+        self.db.max("block_height", "blocks").await.unwrap_or(0)
     }
 
     pub async fn flush(&mut self) -> anyhow::Result<()> {
