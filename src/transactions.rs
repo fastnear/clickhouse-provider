@@ -241,7 +241,7 @@ impl TransactionsData {
                     self.tx_cache
                         .insert_transaction(pending_transaction, &pending_receipt_ids);
                 }
-                for receipt in chunk.receipts {
+                for receipt in chunk.local_receipts.into_iter().chain(chunk.receipts) {
                     match receipt.receipt {
                         ReceiptEnumView::Action { .. } => {
                             // skipping here, since we'll get one with execution
