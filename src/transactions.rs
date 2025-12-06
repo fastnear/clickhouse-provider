@@ -6,11 +6,11 @@ use fastnear_primitives::near_primitives::hash::CryptoHash;
 use fastnear_primitives::near_primitives::types::{AccountId, BlockHeight};
 use fastnear_primitives::near_primitives::views::{ActionView, ReceiptEnumView};
 
+use crate::s3_tools::insert_transactions_to_s3;
+use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::{env, mem};
-
-use serde_json::Value;
 
 const EVENT_JSON_PREFIX: &str = "EVENT_JSON:";
 const SYSTEM_ACCOUNT_ID: &str = "system";
@@ -553,11 +553,11 @@ impl TransactionsData {
             self.commit_handlers.remove(0).await??;
         }
         let db = self.db.clone();
-        // let garage = self.garage_client.clone();
+        let garage = self.garage.clone();
         let handler = tokio::spawn(async move {
             if !rows.transactions.is_empty() {
                 // Commit to garage first
-                // TODO: insert_transactions_to_s3(&db.client, &rows.transactions).await?;
+                insert_transactions_to_s3(&garage, rows.transactions).await?;
             }
             if !rows.tx_rows.is_empty() {
                 insert_rows_with_retry(&db.client, &rows.tx_rows, "transactions").await?;
@@ -639,7 +639,12 @@ fn add_accounts_from_receipt(accounts: &mut Accounts, receipt: &ImprovedReceiptV
         .set_predecessor();
     let mut is_delegate_receipt = false;
     match &receipt.receipt {
-        ReceiptEnumView::Action { actions, .. } => {
+        ReceiptEnumView::Action {
+            actions, refund_to, ..
+        } => {
+            if let Some(refund_to) = refund_to {
+                accounts.row(refund_to.as_str()).set_explicit_refund_to();
+            }
             for action in actions {
                 match action {
                     ActionView::FunctionCall { args, .. } => {

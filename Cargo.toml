@@ -1,6 +1,6 @@
 [package]
 name = "clickhouse-provider"
-version = "2.7.0"
+version = "2.10.1"
 authors = ["Eugene The Dream"]
 rust-version = "1.86.0"
 edition = "2021"
@@ -28,8 +28,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_repr = "0.1.6"
 
-fastnear-primitives = "0.34.0-rc.4"
-fastnear-neardata-fetcher = "0.34.0-rc.4"
+fastnear-primitives = "0.34.1"
+fastnear-neardata-fetcher = "0.34.1"
 
 clickhouse = { version = "0.13", features = ["native-tls", "lz4"] }
 reqwest = { version = "0.12.2", features = ["json"] }
@@ -38,4 +38,6 @@ base64 = "0.22.1"
 signal-hook = "0.3.18"
 aws-sdk-s3 = "1"
 aws-config = "1.8"
+zstd = "0.13.3"
+rayon = "1.10"
 

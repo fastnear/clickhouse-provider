@@ -129,7 +129,7 @@ impl AccountTxRow {
         self
     }
 
-    pub fn is_explicit_refund_to(&mut self) -> &mut Self {
+    pub fn set_explicit_refund_to(&mut self) -> &mut Self {
         self.is_explicit_refund_to = true;
         self
     }
