@@ -418,7 +418,9 @@ pub struct ImprovedExecutionOutcomeWithReceipt {
    attached_gas           Nullable(UInt64) COMMENT 'The amount of attached gas if the action is FunctionCall',
    method_name            Nullable(String) COMMENT 'The method name if the action is FunctionCall (truncated to 64 characters)',
    args                   Nullable(String) COMMENT 'The arguments if the action is FunctionCall (truncated to 512 characters)',
+   delegate_receiver_id   Nullable(String) COMMENT 'The delegate receiver ID if the action is DelegateAction (valid account ID)',
    global_account_id      Nullable(String) COMMENT 'The global contract account ID if the action is UseGlobalContractByAccountId (valid account ID)',
+   beneficiary_id         Nullable(String) COMMENT 'The beneficiary account ID if the action is DeleteAccount (valid account ID)',
 
    args_account_id        Nullable(String) COMMENT '`account_id` argument from the JSON arguments if the action is FunctionCall (valid account ID)',
    args_new_account_id    Nullable(String) COMMENT '`new_account_id` argument from the JSON arguments if the action is FunctionCall  (valid account ID)',
@@ -445,12 +447,13 @@ pub struct ActionRow {
     pub receiver_id: String,
     pub refund_to_id: Option<String>,
     pub action_type: String,
+
     pub is_success: bool,
     pub num_actions: u16,
     pub gas_burnt: u64,
     pub tokens_burnt: u128,
 
-    pub success_value: Option<String>,
+    pub success_value: Option<Vec<u8>>,
     pub success_receipt: Option<String>,
     pub success_value_int: Option<u128>,
 
@@ -461,8 +464,10 @@ pub struct ActionRow {
     pub gas_price: u128,
     pub attached_gas: Option<u64>,
     pub method_name: Option<String>,
-    pub args: Option<String>,
+    pub args: Option<Vec<u8>>,
+    pub delegate_receiver_id: Option<String>,
     pub global_account_id: Option<String>,
+    pub beneficiary_id: Option<String>,
 
     pub args_account_id: Option<String>,
     pub args_new_account_id: Option<String>,

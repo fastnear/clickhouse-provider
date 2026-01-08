@@ -152,7 +152,9 @@ CREATE TABLE actions
     attached_gas           Nullable(UInt64) COMMENT 'The amount of attached gas if the action is FunctionCall',
     method_name            Nullable(String) COMMENT 'The method name if the action is FunctionCall (truncated to 64 characters)',
     args                   Nullable(String) COMMENT 'The arguments if the action is FunctionCall (truncated to 512 characters)',
+    delegate_receiver_id   Nullable(String) COMMENT 'The delegate receiver ID if the action is DelegateAction (valid account ID)',
     global_account_id      Nullable(String) COMMENT 'The global contract account ID if the action is UseGlobalContractByAccountId (valid account ID)',
+    beneficiary_id         Nullable(String) COMMENT 'The beneficiary account ID if the action is DeleteAccount (valid account ID)',
 
     args_account_id        Nullable(String) COMMENT '`account_id` argument from the JSON arguments if the action is FunctionCall (valid account ID)',
     args_new_account_id    Nullable(String) COMMENT '`new_account_id` argument from the JSON arguments if the action is FunctionCall  (valid account ID)',
@@ -214,7 +216,7 @@ CREATE TABLE events
     data_new_owner_id           Nullable(String) COMMENT '`new_owner_id` field from first data object in the JSON event (valid account ID)',
     data_liquidation_account_id Nullable(String) COMMENT '`liquidation_account_id` field from the data object in the JSON event (valid account ID)',
     data_token_id               Nullable(String) COMMENT '`token_id` field from the first data object in the JSON event (truncated to 160 characters). For MT standard, the first `token_id` from `token_ids` array, when `token_id` does not exist. For DIP-4 standard, the first key from `tokens` map, or `token` if only single token transfer',
-    data_amount                 Nullable(UInt128) COMMENT '`amount` field from the first data object in the JSON event. For MT standard, the first `amount` from `amounts` array, when `amount` does not exist. For DIP-4 standard, the first value from `tokens` map',
+    data_amount                 Nullable(UInt128) COMMENT '`amount` field from the first data object in the JSON event. For MT standard, the first `amount` from `amounts` array, when `amount` does not exist. For DIP-4 standard, the first value from `amounts` map',
 
     INDEX                       block_timestamp_minmax_idx block_timestamp TYPE minmax GRANULARITY 1,
     INDEX                       account_id_bloom_index account_id TYPE bloom_filter() GRANULARITY 1,

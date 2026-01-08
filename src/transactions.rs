@@ -6,6 +6,7 @@ use fastnear_primitives::near_primitives::hash::CryptoHash;
 use fastnear_primitives::near_primitives::types::{AccountId, BlockHeight};
 use fastnear_primitives::near_primitives::views::{ActionView, ReceiptEnumView};
 
+use crate::actions::extract_rows;
 use crate::s3_tools::insert_transactions_to_s3;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -58,6 +59,8 @@ pub struct TxRows {
     pub receipt_txs: Vec<ReceiptTxRow>,
     pub blocks: Vec<BlockRow>,
     pub transactions: Vec<(String, String)>,
+    pub actions: Vec<ActionRow>,
+    pub events: Vec<EventRow>,
 }
 
 impl PendingTransaction {
@@ -136,6 +139,8 @@ impl TransactionsData {
         };
 
         let mut pending_receipt_txs = vec![];
+        let mut pending_action_rows = vec![];
+        let mut pending_event_rows = vec![];
 
         let catching_up = block_height <= last_db_block_height;
 
@@ -143,6 +148,8 @@ impl TransactionsData {
         let mut tx_index = 0u32;
         let mut appear_receipt_index = 0u32;
         let mut receipt_index = 0u32;
+        let mut block_data_index = 0u32;
+        let mut block_action_index = 0u32;
 
         let mut shards = block.shards;
         for shard in &mut shards {
@@ -235,7 +242,7 @@ impl TransactionsData {
                 let action_receipt = self
                     .tx_cache
                     .remove_action_receipt(&receipt_id)
-                    .expect("Missing action receipt");
+                    .expect("Missing action receipt for an receipt execution outcome");
                 let pending_transaction = self.tx_cache.get_and_remove_transaction(&tx_hash);
                 if pending_transaction.is_none() {
                     panic!(
@@ -322,6 +329,20 @@ impl TransactionsData {
                 ));
                 receipt_index += 1;
                 let pending_receipt_ids = execution_outcome.outcome.receipt_ids.clone();
+
+                // Actions/Events
+                let (action_rows, event_rows) = extract_rows(
+                    &action_receipt,
+                    current_receipt_index,
+                    &execution_outcome.outcome,
+                    &pending_transaction,
+                    &block_info,
+                    &mut block_data_index,
+                    &mut block_action_index,
+                );
+                pending_action_rows.extend(action_rows);
+                pending_event_rows.extend(event_rows);
+
                 pending_transaction.transaction.receipts.push(
                     ImprovedExecutionOutcomeWithReceipt {
                         execution_outcome: ImprovedExecutionOutcome::from_outcome(
@@ -356,6 +377,8 @@ impl TransactionsData {
 
         if !catching_up {
             self.rows.receipt_txs.extend(pending_receipt_txs);
+            self.rows.actions.extend(pending_action_rows);
+            self.rows.events.extend(pending_event_rows);
             self.rows.blocks.push(block_row);
             for tx_hash in transactions_to_commit {
                 let mut transaction = self
