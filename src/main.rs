@@ -133,9 +133,19 @@ async fn main() {
     if let Some(auth_bearer_token) = auth_bearer_token {
         builder = builder.auth_bearer_token(auth_bearer_token);
     }
-    let fetcher_handle = tokio::spawn(fetcher::start_fetcher(builder.build(), sender, is_running));
+    let fetcher_handle = tokio::spawn(fetcher::start_fetcher(
+        builder.build(),
+        sender,
+        is_running.clone(),
+    ));
     let block_listener_handle = tokio::spawn(async move {
-        listen_blocks_for_transactions(receiver, transactions_data, last_block_height).await
+        listen_blocks_for_transactions(
+            receiver,
+            transactions_data,
+            last_block_height,
+            is_running.clone(),
+        )
+        .await
     });
     let result = try_join!(block_listener_handle, signal_handle, fetcher_handle);
     if let Err(err) = result {
@@ -150,9 +160,14 @@ async fn listen_blocks_for_transactions(
     mut stream: mpsc::Receiver<BlockWithTxHashes>,
     mut transactions_data: TransactionsData,
     last_block_height: u64,
+    is_running: Arc<AtomicBool>,
 ) {
     let mut prev_block_hash = None;
     while let Some(block) = stream.recv().await {
+        if !is_running.load(Ordering::SeqCst) {
+            // Graceful shutdown. Consuming remaining blocks without processing.
+            continue;
+        }
         let block_height = block.block.header.height;
         tracing::log::info!(target: PROJECT_ID, "Processing block: {}", block_height);
         prev_block_hash = Some(

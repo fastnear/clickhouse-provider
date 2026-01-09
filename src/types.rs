@@ -406,7 +406,7 @@ pub struct ImprovedExecutionOutcomeWithReceipt {
    gas_burnt              UInt64 COMMENT 'The amount of burnt gas for the execution of the whole receipt (not just this action)',
    tokens_burnt           UInt128 COMMENT 'The amount of tokens in yoctoNEAR burnt for the execution of the whole receipt (not just this action)',
 
-   success_value          Nullable(String) COMMENT 'Value, if the status is SuccessValue (it may be a binary string)',
+   success_value          Nullable(String) COMMENT 'Value, if the status is SuccessValue (it may be a binary string, truncated to 160 bytes)',
    success_receipt        Nullable(String) COMMENT 'The receipt ID, if the status is SuccessReceipt',
    success_value_int      Nullable(UInt128) COMMENT 'The parsed integer string from the returned value of the FunctionCall action',
 

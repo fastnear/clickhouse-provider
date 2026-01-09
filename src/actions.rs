@@ -207,7 +207,9 @@ pub fn extract_rows(
     };
     let return_value_int = extract_return_value_int(&execution_status);
     let status_success_value = match &execution_status {
-        ExecutionStatusView::SuccessValue(value) => Some(value.clone()),
+        ExecutionStatusView::SuccessValue(value) => {
+            Some(value[..MAX_EVENT_TOKEN_LENGTH.min(value.len())].to_vec())
+        }
         _ => None,
     };
     let status_success_receipt = match &execution_status {
