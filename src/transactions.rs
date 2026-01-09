@@ -390,9 +390,9 @@ impl TransactionsData {
                     self.tx_cache.insert_transaction(transaction, &[]);
                 }
             }
-        }
 
-        self.maybe_commit(block_height).await?;
+            self.maybe_commit(block_height).await?;
+        }
 
         Ok(block_hash)
     }

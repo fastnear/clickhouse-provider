@@ -28,7 +28,7 @@ pub struct EventJson {
    tx_block_timestamp DateTime64(9, 'UTC') COMMENT 'The block timestamp in UTC when the transaction was included',
    last_block_height  UInt64 COMMENT 'The block height when the last receipt was processed for the transaction',
    is_completed       Bool COMMENT 'Whether the transaction has all the data or still pending some receipts',
-   shard_id           Uint64 COMMENT 'The shard ID where the transaction was included',
+   shard_id           UInt64 COMMENT 'The shard ID where the transaction was included',
    receiver_id        String COMMENT 'The account ID of the transaction receiver',
    signer_public_key  String COMMENT 'The public key of the transaction signer',
    priority_fee       UInt64 COMMENT 'The priority fee of the transaction',
@@ -162,7 +162,7 @@ impl AccountTxRow {
 
 /*
    receipt_id           String COMMENT 'The receipt hash',
-   receipt_block_height UInt64 COMMENT 'The block height when the receipt was executed',
+   block_height         UInt64 COMMENT 'The block height when the receipt was executed',
    receipt_index        UInt32 COMMENT 'Index of the receipt that appears in the block across all shards',
    appear_block_height  UInt64 COMMENT 'The block height when the receipt first appeared (e.g. data receipts appear earlier)',
    appear_receipt_index UInt32 COMMENT 'Index of the receipt that first appeared in the block across all shards',
@@ -173,14 +173,14 @@ impl AccountTxRow {
    predecessor_id       String COMMENT 'The account ID of the receipt predecessor',
    receiver_id          String COMMENT 'The account ID of where the receipt is executed',
    receipt_type         LowCardinality(String) COMMENT 'The type of the receipt: Action, Data, GlobalContractDistribution',
-   priority             Uint64 COMMENT 'The priority of the receipt',
-   shard_id             Uint64 COMMENT 'The shard ID where the receipt was included',
+   priority             UInt64 COMMENT 'The priority of the receipt',
+   shard_id             UInt64 COMMENT 'The shard ID where the receipt was included',
    is_success           Bool COMMENT 'Whether the receipt execution was successful or not, true for Data and GlobalContractDistribution receipts',
 */
 #[derive(Row, Serialize, Deserialize, Clone, Debug)]
 pub struct ReceiptTxRow {
     pub receipt_id: String,
-    pub receipt_block_height: u64,
+    pub block_height: u64,
     pub receipt_index: u32,
     pub appear_block_height: u64,
     pub appear_receipt_index: u32,
@@ -213,7 +213,7 @@ impl ReceiptTxRow {
         .to_string();
         Self {
             receipt_id: receipt.receipt_id.to_string(),
-            receipt_block_height: block_info.block_height,
+            block_height: block_info.block_height,
             receipt_index,
             appear_block_height: receipt.block_height,
             appear_receipt_index: receipt.receipt_index,

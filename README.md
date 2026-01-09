@@ -14,7 +14,7 @@ CREATE TABLE transactions
     tx_block_timestamp DateTime64(9, 'UTC') COMMENT 'The block timestamp in UTC when the transaction was included',
     last_block_height  UInt64 COMMENT 'The block height when the last receipt was processed for the transaction',
     is_completed       Bool COMMENT 'Whether the transaction has all the data or still pending some receipts',
-    shard_id           Uint64 COMMENT 'The shard ID where the transaction was included',
+    shard_id           UInt64 COMMENT 'The shard ID where the transaction was included',
     receiver_id        String COMMENT 'The account ID of the transaction receiver',
     signer_public_key  String COMMENT 'The public key of the transaction signer',
     priority_fee       UInt64 COMMENT 'The priority fee of the transaction',
@@ -31,8 +31,8 @@ CREATE TABLE transactions
     INDEX              tx_block_height_minmax_idx tx_block_height TYPE minmax GRANULARITY 1,
     INDEX              tx_block_timestamp_minmax_idx tx_block_timestamp TYPE minmax GRANULARITY 1,
 ) ENGINE = ReplacingMergeTree
-PRIMARY KEY (tx_block_height)
 PARTITION BY toYYYYMM(tx_block_timestamp)
+PRIMARY KEY (tx_block_height)
 ORDER BY (tx_block_height, tx_index)
 
 CREATE TABLE account_txs
@@ -78,8 +78,8 @@ CREATE TABLE receipt_txs
     predecessor_id       String COMMENT 'The account ID of the receipt predecessor',
     receiver_id          String COMMENT 'The account ID of where the receipt is executed',
     receipt_type         LowCardinality(String) COMMENT 'The type of the receipt: Action, Data, GlobalContractDistribution',
-    priority             Uint64 COMMENT 'The priority of the receipt',
-    shard_id             Uint64 COMMENT 'The shard ID where the receipt was executed',
+    priority             UInt64 COMMENT 'The priority of the receipt',
+    shard_id             UInt64 COMMENT 'The shard ID where the receipt was executed',
     is_success           Bool COMMENT 'Whether the receipt execution was successful or not',
 
     INDEX                receipt_id_bloom_index receipt_id TYPE bloom_filter() GRANULARITY 1,
@@ -168,19 +168,7 @@ CREATE TABLE actions
     args_nft_token_id      Nullable(String) COMMENT '`nft_token_id` argument from the JSON arguments if the action is FunctionCall (truncated to 160 characters)',
 
     INDEX                  block_timestamp_minmax_idx block_timestamp TYPE minmax GRANULARITY 1,
-    INDEX                  account_id_bloom_index account_id TYPE bloom_filter() GRANULARITY 1,
-    INDEX                  signer_id_bloom_index signer_id TYPE bloom_filter() GRANULARITY 1,
-    INDEX                  block_hash_bloom_index block_hash TYPE bloom_filter() GRANULARITY 1,
-    INDEX                  transaction_hash_bloom_index transaction_hash TYPE bloom_filter() GRANULARITY 1,
-    INDEX                  receipt_id_bloom_index receipt_id TYPE bloom_filter() GRANULARITY 1,
-    INDEX                  precise_public_key_bloom_index public_key TYPE bloom_filter(0.001) GRANULARITY 1,
-    INDEX                  predecessor_id_bloom_index predecessor_id TYPE bloom_filter() GRANULARITY 1,
-    INDEX                  method_name_index method_name TYPE set(0) GRANULARITY 1,
-    INDEX                  args_account_id_bloom_index args_account_id TYPE bloom_filter() GRANULARITY 1,
-    INDEX                  args_new_account_id_bloom_index args_new_account_id TYPE bloom_filter() GRANULARITY 1,
-    INDEX                  args_owner_id_bloom_index args_owner_id TYPE bloom_filter() GRANULARITY 1,
-    INDEX                  args_receiver_id_bloom_index args_receiver_id TYPE bloom_filter() GRANULARITY 1,
-    INDEX                  args_sender_id_bloom_index args_sender_id TYPE bloom_filter() GRANULARITY 1,
+    INDEX                  receiver_id_bloom_index receiver_id TYPE bloom_filter() GRANULARITY 1,
 ) ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMM(block_timestamp)
 PRIMARY KEY (block_height, block_action_index)
@@ -219,12 +207,7 @@ CREATE TABLE events
     data_amount                 Nullable(UInt128) COMMENT '`amount` field from the first data object in the JSON event. For MT standard, the first `amount` from `amounts` array, when `amount` does not exist. For DIP-4 standard, the first value from `amounts` map',
 
     INDEX                       block_timestamp_minmax_idx block_timestamp TYPE minmax GRANULARITY 1,
-    INDEX                       account_id_bloom_index account_id TYPE bloom_filter() GRANULARITY 1,
-    INDEX                       event_set_index event TYPE set(0) GRANULARITY 1,
-    INDEX                       data_account_id_bloom_index data_account_id TYPE bloom_filter() GRANULARITY 1,
-    INDEX                       data_owner_id_bloom_index data_owner_id TYPE bloom_filter() GRANULARITY 1,
-    INDEX                       data_old_owner_id_bloom_index data_old_owner_id TYPE bloom_filter() GRANULARITY 1,
-    INDEX                       data_new_owner_id_bloom_index data_new_owner_id TYPE bloom_filter() GRANULARITY 1,
+    INDEX                       receiver_id_bloom_index receiver_id TYPE bloom_filter() GRANULARITY 1,
 ) ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMM(block_timestamp)
 PRIMARY KEY (block_height, block_data_index)
