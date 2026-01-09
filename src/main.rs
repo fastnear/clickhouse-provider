@@ -114,10 +114,12 @@ async fn main() {
             end_backfill_block_height.unwrap_or(10u64.pow(15)),
         )
         .await;
-    let last_block_height = backfill_block_height.unwrap_or(db_last_block_height);
-    tracing::log::info!(target: PROJECT_ID, "Last block height: {}", last_block_height);
-
-    let start_block_height = last_block_height.saturating_sub(SAFE_CATCH_UP_OFFSET);
+    tracing::log::info!(target: PROJECT_ID, "Last block height in range: {}", db_last_block_height);
+    let last_block_height = db_last_block_height;
+    let start_block_height = (db_last_block_height + 1)
+        .saturating_sub(SAFE_CATCH_UP_OFFSET)
+        .max(first_block_height);
+    tracing::log::info!(target: PROJECT_ID, "Starting from block height: {}", start_block_height);
 
     let start_block_height = first_block_height.max(start_block_height);
     let (sender, receiver) = mpsc::channel(100);
