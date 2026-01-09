@@ -354,7 +354,7 @@ pub fn extract_rows(
                     },
                     args: match &action {
                         ActionView::FunctionCall { args, .. } => {
-                            Some(args[..MAX_ARGS_LENGTH].to_vec())
+                            Some(args[..MAX_ARGS_LENGTH.min(args.len())].to_vec())
                         }
                         _ => None,
                     },
