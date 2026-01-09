@@ -169,7 +169,13 @@ async fn listen_blocks_for_transactions(
             continue;
         }
         let block_height = block.block.header.height;
-        tracing::log::info!(target: PROJECT_ID, "Processing block: {}", block_height);
+        let block_timestamp = block.block.header.timestamp_nanosec;
+        let current_time_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        let time_diff_ns = current_time_ns.saturating_sub(block_timestamp);
+        tracing::log::info!(target: PROJECT_ID, "Processing block {}\tlatency {:.3} sec", block_height, time_diff_ns as f64 / 1e9f64);
         prev_block_hash = Some(
             transactions_data
                 .process_block(block, last_block_height, prev_block_hash)
