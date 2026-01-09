@@ -26,6 +26,7 @@ const SAFE_CATCH_UP_OFFSET: u64 = 1000;
 
 #[tokio::main]
 async fn main() {
+    #[allow(deprecated)]
     openssl_probe::init_ssl_cert_env_vars();
     dotenv().ok();
 
@@ -106,7 +107,13 @@ async fn main() {
 
     let transactions_data =
         TransactionsData::new(end_backfill_block_height.is_some(), garage, db.clone());
-    let db_last_block_height = transactions_data.last_block_height().await;
+    let db_last_block_height = transactions_data
+        .last_block_in_range(
+            &db,
+            backfill_block_height.unwrap_or(0),
+            end_backfill_block_height.unwrap_or(10u64.pow(15)),
+        )
+        .await;
     let last_block_height = backfill_block_height.unwrap_or(db_last_block_height);
     tracing::log::info!(target: PROJECT_ID, "Last block height: {}", last_block_height);
 

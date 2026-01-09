@@ -609,8 +609,21 @@ impl TransactionsData {
         Ok(())
     }
 
-    pub async fn last_block_height(&self) -> BlockHeight {
-        self.db.max("block_height", "blocks").await.unwrap_or(0)
+    pub async fn last_block_in_range(
+        &self,
+        db: &ClickDB,
+        start_block: BlockHeight,
+        end_block: BlockHeight,
+    ) -> BlockHeight {
+        let res = db
+            .max_in_range("block_height", "blocks", start_block, end_block)
+            .await
+            .unwrap_or(0);
+        if res == 0 {
+            start_block.saturating_sub(1)
+        } else {
+            res
+        }
     }
 
     pub async fn flush(&mut self) -> anyhow::Result<()> {
