@@ -10,6 +10,7 @@ use serde::Deserialize;
 
 const MAX_EVENT_FIELD_LENGTH: usize = 64;
 const MAX_EVENT_TOKEN_LENGTH: usize = 160;
+const MAX_ARGS_LENGTH: usize = 512;
 const EVENT_LOG_PREFIX: &str = "EVENT_JSON:";
 
 #[derive(Deserialize)]
@@ -57,6 +58,8 @@ pub fn extract_args_data(action: &ActionView) -> Option<ArgsData> {
                 data.parsed_token_id = Some(token.clone());
             }
 
+            limit_length_opt(&mut data.token_id, MAX_EVENT_TOKEN_LENGTH);
+
             // Parse amount
             if let Some(amount) = data.amount.take() {
                 data.parsed_amount = amount.parse().ok();
@@ -70,9 +73,15 @@ pub fn extract_args_data(action: &ActionView) -> Option<ArgsData> {
     }
 }
 
+fn limit_length_inline(s: &str, max_len: usize) -> String {
+    let index = s.floor_char_boundary(max_len);
+    s[..index].to_string()
+}
+
 fn limit_length(s: &mut String, max_len: usize) {
     if s.len() > max_len {
-        s.truncate(max_len);
+        let index = s.floor_char_boundary(max_len);
+        s.truncate(index);
     }
 }
 
@@ -339,12 +348,14 @@ pub fn extract_rows(
                     },
                     method_name: match &action {
                         ActionView::FunctionCall { method_name, .. } => {
-                            Some(method_name.to_string())
+                            Some(limit_length_inline(&method_name, MAX_EVENT_FIELD_LENGTH))
                         }
                         _ => None,
                     },
                     args: match &action {
-                        ActionView::FunctionCall { args, .. } => Some(args.to_vec()),
+                        ActionView::FunctionCall { args, .. } => {
+                            Some(args[..MAX_ARGS_LENGTH].to_vec())
+                        }
                         _ => None,
                     },
                     delegate_receiver_id: match &action {

@@ -373,7 +373,10 @@ impl TransactionsData {
         block_row.num_transactions = tx_index;
         block_row.num_receipts = receipt_index;
 
-        tracing::log::info!(target: PROJECT_ID, "#{}: {} transactions to commit. Pending {}", block_height, transactions_to_commit.len(), self.tx_cache.stats());
+        tracing::log::info!(target: PROJECT_ID, "#{}: [{}] {} transactions to commit. Pending {}",
+            block_height,
+            if catching_up { "Catching up" } else { "Live" },
+            transactions_to_commit.len(), self.tx_cache.stats());
 
         if !catching_up {
             self.rows.receipt_txs.extend(pending_receipt_txs);
@@ -547,13 +550,15 @@ impl TransactionsData {
         if is_round_block {
             tracing::log::info!(
                 target: CLICKHOUSE_TARGET,
-                "#{}: Having {} tx_rows, {} account_txs, {} receipts_txs, {} blocks, {} transactions",
+                "#{}: Having {} tx_rows, {} account_txs, {} receipts_txs, {} blocks, {} transactions, {} actions, {} events",
                 block_height,
                 self.rows.tx_rows.len(),
                 self.rows.account_txs.len(),
                 self.rows.receipt_txs.len(),
                 self.rows.blocks.len(),
-                self.rows.transactions.len()
+                self.rows.transactions.len(),
+                self.rows.actions.len(),
+                self.rows.events.len(),
             );
         }
         if self.rows.tx_rows.len() >= self.db.min_batch || is_round_block || self.commit_every_block
@@ -594,13 +599,21 @@ impl TransactionsData {
             if !rows.blocks.is_empty() {
                 insert_rows_with_retry(&db.client, &rows.blocks, "blocks").await?;
             }
+            if !rows.actions.is_empty() {
+                insert_rows_with_retry(&db.client, &rows.actions, "actions").await?;
+            }
+            if !rows.events.is_empty() {
+                insert_rows_with_retry(&db.client, &rows.events, "events").await?;
+            }
             tracing::log::info!(
                 target: CLICKHOUSE_TARGET,
-                "Committed {} tx_rows, {} account_txs, {} receipts_txs, {} blocks",
+                "Committed {} tx_rows, {} account_txs, {} receipts_txs, {} blocks, {} actions, {} events",
                 rows.tx_rows.len(),
                 rows.account_txs.len(),
                 rows.receipt_txs.len(),
                 rows.blocks.len(),
+                rows.actions.len(),
+                rows.events.len(),
             );
             Ok::<(), anyhow::Error>(())
         });
