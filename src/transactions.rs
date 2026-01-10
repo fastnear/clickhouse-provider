@@ -12,6 +12,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::{env, mem};
+use tokio::sync::Semaphore;
 
 const EVENT_JSON_PREFIX: &str = "EVENT_JSON:";
 const SYSTEM_ACCOUNT_ID: &str = "system";
@@ -75,7 +76,7 @@ pub struct TransactionsData {
     pub tx_cache: TxCache,
     pub rows: TxRows,
     pub commit_handlers: Vec<tokio::task::JoinHandle<Result<(), anyhow::Error>>>,
-    pub max_commit_handlers: usize,
+    pub commit_semaphore: Arc<Semaphore>,
     pub garage: Arc<aws_sdk_s3::Client>,
     pub db: Arc<ClickDB>,
 }
@@ -87,20 +88,23 @@ impl TransactionsData {
             .unwrap_or(false);
         let tx_cache = TxCache::new();
 
+        let max_commit_handlers = if is_backfill {
+            env::var("MAX_COMMIT_HANDLERS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(MAX_COMMIT_HANDLERS)
+        } else {
+            1
+        };
+        let commit_semaphore = Arc::new(Semaphore::new(max_commit_handlers));
+
         Self {
             commit_every_block,
             is_backfill,
             tx_cache,
             rows: TxRows::default(),
             commit_handlers: vec![],
-            max_commit_handlers: if is_backfill {
-                env::var("MAX_COMMIT_HANDLERS")
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(MAX_COMMIT_HANDLERS)
-            } else {
-                1
-            },
+            commit_semaphore,
             garage,
             db,
         }
@@ -581,12 +585,23 @@ impl TransactionsData {
     pub async fn commit(&mut self) -> anyhow::Result<()> {
         let mut rows = TxRows::default();
         std::mem::swap(&mut rows, &mut self.rows);
-        while self.commit_handlers.len() >= self.max_commit_handlers {
-            self.commit_handlers.remove(0).await??;
+        tracing::log::info!(
+            target: CLICKHOUSE_TARGET,
+            "Preparing to commit. {} handlers in progress",
+            self.commit_handlers.len()
+        );
+        while let Some(first) = self.commit_handlers.first() {
+            if first.is_finished() {
+                self.commit_handlers.remove(0).await??;
+            } else {
+                break;
+            }
         }
+        let permit = self.commit_semaphore.clone().acquire_owned().await?;
         let db = self.db.clone();
         let garage = self.garage.clone();
         let handler = tokio::spawn(async move {
+            let _permit = permit;
             if !rows.transactions.is_empty() {
                 // Commit to garage first
                 let start = std::time::Instant::now();
