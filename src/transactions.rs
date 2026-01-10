@@ -610,14 +610,14 @@ impl TransactionsData {
             if !rows.receipt_txs.is_empty() {
                 insert_rows_with_retry(&db.client, &rows.receipt_txs, "receipt_txs").await?;
             }
-            if !rows.blocks.is_empty() {
-                insert_rows_with_retry(&db.client, &rows.blocks, "blocks").await?;
-            }
             if !rows.actions.is_empty() {
                 insert_rows_with_retry(&db.client, &rows.actions, "actions").await?;
             }
             if !rows.events.is_empty() {
                 insert_rows_with_retry(&db.client, &rows.events, "events").await?;
+            }
+            if !rows.blocks.is_empty() {
+                insert_rows_with_retry(&db.client, &rows.blocks, "blocks").await?;
             }
             let duration = start.elapsed().as_millis();
             tracing::log::info!(
