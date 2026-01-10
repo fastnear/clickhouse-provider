@@ -585,8 +585,18 @@ impl TransactionsData {
         let handler = tokio::spawn(async move {
             if !rows.transactions.is_empty() {
                 // Commit to garage first
+                let start = std::time::Instant::now();
+                let cnt = rows.transactions.len();
                 insert_transactions_to_s3(&garage, rows.transactions).await?;
+                let duration = start.elapsed().as_millis();
+                tracing::log::info!(
+                    target: CLICKHOUSE_TARGET,
+                    "({} ms) Inserted {} transactions to S3",
+                    duration,
+                    cnt,
+                );
             }
+            let start = std::time::Instant::now();
             if !rows.tx_rows.is_empty() {
                 insert_rows_with_retry(&db.client, &rows.tx_rows, "transactions").await?;
             }
@@ -605,9 +615,11 @@ impl TransactionsData {
             if !rows.events.is_empty() {
                 insert_rows_with_retry(&db.client, &rows.events, "events").await?;
             }
+            let duration = start.elapsed().as_millis();
             tracing::log::info!(
                 target: CLICKHOUSE_TARGET,
-                "Committed {} tx_rows, {} account_txs, {} receipts_txs, {} blocks, {} actions, {} events",
+                "({} ms) Committed {} tx_rows, {} account_txs, {} receipts_txs, {} blocks, {} actions, {} events",
+                duration,
                 rows.tx_rows.len(),
                 rows.account_txs.len(),
                 rows.receipt_txs.len(),
