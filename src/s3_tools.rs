@@ -27,6 +27,7 @@ pub async fn insert_transactions_to_s3(
     let s3_bucket = std::env::var("S3_BUCKET").expect("S3_BUCKET is not set");
     let bucket = s3_bucket.as_str();
 
+    let start = std::time::Instant::now();
     // Compressing transactions with zstd
     let transactions = transactions
         .into_par_iter() // ← Par
@@ -35,6 +36,8 @@ pub async fn insert_transactions_to_s3(
             (tx_hash, compressed_data)
         })
         .collect::<Vec<_>>();
+    let duration = start.elapsed().as_millis();
+    tracing::log::info!(target: S3_TARGET, "({duration} ms) Compressed {} transactions", transactions.len());
 
     let results = stream::iter(transactions)
         .map(|(tx_hash, compressed)| {
