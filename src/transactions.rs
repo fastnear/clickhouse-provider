@@ -75,6 +75,7 @@ pub struct TransactionsData {
     pub tx_cache: TxCache,
     pub rows: TxRows,
     pub commit_handlers: Vec<tokio::task::JoinHandle<Result<(), anyhow::Error>>>,
+    pub max_commit_handlers: usize,
     pub garage: Arc<aws_sdk_s3::Client>,
     pub db: Arc<ClickDB>,
 }
@@ -92,6 +93,14 @@ impl TransactionsData {
             tx_cache,
             rows: TxRows::default(),
             commit_handlers: vec![],
+            max_commit_handlers: if is_backfill {
+                env::var("MAX_COMMIT_HANDLERS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(MAX_COMMIT_HANDLERS)
+            } else {
+                1
+            },
             garage,
             db,
         }
@@ -572,12 +581,7 @@ impl TransactionsData {
     pub async fn commit(&mut self) -> anyhow::Result<()> {
         let mut rows = TxRows::default();
         std::mem::swap(&mut rows, &mut self.rows);
-        let max_commit_handlers = if self.is_backfill {
-            MAX_COMMIT_HANDLERS
-        } else {
-            1
-        };
-        while self.commit_handlers.len() >= max_commit_handlers {
+        while self.commit_handlers.len() >= self.max_commit_handlers {
             self.commit_handlers.remove(0).await??;
         }
         let db = self.db.clone();
