@@ -63,6 +63,9 @@ pub async fn insert_rows_with_retry<T>(
 where
     T: Row + Serialize,
 {
+    if rows.is_empty() {
+        return Ok(());
+    }
     let mut delay = Duration::from_millis(100);
     let max_retries = 10;
     let mut i = 0;

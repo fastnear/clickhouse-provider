@@ -601,24 +601,15 @@ impl TransactionsData {
                 );
             }
             let start = std::time::Instant::now();
-            if !rows.tx_rows.is_empty() {
-                insert_rows_with_retry(&db.client, &rows.tx_rows, "transactions").await?;
-            }
-            if !rows.account_txs.is_empty() {
-                insert_rows_with_retry(&db.client, &rows.account_txs, "account_txs").await?;
-            }
-            if !rows.receipt_txs.is_empty() {
-                insert_rows_with_retry(&db.client, &rows.receipt_txs, "receipt_txs").await?;
-            }
-            if !rows.actions.is_empty() {
-                insert_rows_with_retry(&db.client, &rows.actions, "actions").await?;
-            }
-            if !rows.events.is_empty() {
-                insert_rows_with_retry(&db.client, &rows.events, "events").await?;
-            }
-            if !rows.blocks.is_empty() {
-                insert_rows_with_retry(&db.client, &rows.blocks, "blocks").await?;
-            }
+
+            tokio::try_join!(
+                insert_rows_with_retry(&db.client, &rows.tx_rows, "transactions"),
+                insert_rows_with_retry(&db.client, &rows.account_txs, "account_txs"),
+                insert_rows_with_retry(&db.client, &rows.receipt_txs, "receipt_txs"),
+                insert_rows_with_retry(&db.client, &rows.actions, "actions"),
+                insert_rows_with_retry(&db.client, &rows.events, "events"),
+            )?;
+            insert_rows_with_retry(&db.client, &rows.blocks, "blocks").await?;
             let duration = start.elapsed().as_millis();
             tracing::log::info!(
                 target: CLICKHOUSE_TARGET,
