@@ -2,20 +2,22 @@ mod actions;
 mod click;
 mod common;
 
-mod s3_tools;
+mod k2v_tools;
 mod transactions;
 mod types;
+
+mod k2v_client;
 
 use crate::click::*;
 use crate::transactions::TransactionsData;
 use std::sync::Arc;
 
-use aws_config::BehaviorVersion;
 use dotenv::dotenv;
 use fastnear_neardata_fetcher::fetcher;
 use fastnear_primitives::block_with_tx_hash::*;
 use fastnear_primitives::near_primitives::types::BlockHeight;
 use fastnear_primitives::types::ChainId;
+use k2v_client::{K2vClient, K2vClientConfig};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
 use tokio::try_join;
@@ -50,7 +52,7 @@ async fn main() {
         }
     });
 
-    common::setup_tracing("s3=info,clickhouse=info,provider=info,neardata-fetcher=info");
+    common::setup_tracing("garage=info,clickhouse=info,provider=info,neardata-fetcher=info");
 
     tracing::log::info!(target: PROJECT_ID, "Starting Clickhouse Provider");
 
@@ -68,15 +70,44 @@ async fn main() {
         .await
         .expect("Failed to connect to Clickhouse");
 
-    let config = aws_config::load_defaults(BehaviorVersion::latest()).await;
-    let garage = Arc::new(aws_sdk_s3::Client::new(&config));
-    let s3_bucket = std::env::var("S3_BUCKET").expect("S3_BUCKET is not set");
-    garage
-        .head_bucket()
-        .bucket(s3_bucket)
-        .send()
+    let config = K2vClientConfig {
+        endpoint: std::env::var("K2V_ENDPOINT").expect("No K2V_ENDPOINT provided"),
+        bucket: std::env::var("K2V_BUCKET").expect("No K2V_BUCKET provided"),
+        region: std::env::var("AWS_REGION").expect("No AWS_REGION provided"),
+        aws_access_key_id: std::env::var("AWS_ACCESS_KEY_ID")
+            .expect("No AWS_ACCESS_KEY_ID provided"),
+        aws_secret_access_key: std::env::var("AWS_SECRET_ACCESS_KEY")
+            .expect("No AWS_SECRET_ACCESS_KEY provided"),
+        user_agent: None,
+        default_timeout: Some(std::time::Duration::from_secs(60)),
+    };
+    let garage = Arc::new(K2vClient::new(config).expect("Failed to create garage k2v client"));
+    let _val = garage
+        .read_index(k2v_client::Filter {
+            start: None,
+            end: None,
+            prefix: None,
+            limit: Some(1),
+            reverse: false,
+        })
         .await
-        .expect("Failed S3 HeadBucket request");
+        .expect("Failed to read index");
+
+    // garage.read_batch(&[
+    //     BatchReadOp {
+    //         partition_key: "",
+    //         filter: Filter {
+    //             start: None,
+    //             end: None,
+    //             prefix: None,
+    //             limit: Some(1),
+    //             reverse: true,
+    //         },
+    //         single_item: true,
+    //         conflicts_only: false,
+    //         tombstones: false,
+    //     }
+    // ]);
 
     let client = reqwest::Client::new();
     let chain_id = ChainId::try_from(std::env::var("CHAIN_ID").expect("CHAIN_ID is not set"))

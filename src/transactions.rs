@@ -7,7 +7,7 @@ use fastnear_primitives::near_primitives::types::{AccountId, BlockHeight};
 use fastnear_primitives::near_primitives::views::{ActionView, ReceiptEnumView};
 
 use crate::actions::extract_rows;
-use crate::s3_tools::insert_transactions_to_s3;
+use crate::k2v_tools::insert_transactions_to_garage;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
@@ -59,7 +59,7 @@ pub struct TxRows {
     pub account_txs: Vec<AccountTxRow>,
     pub receipt_txs: Vec<ReceiptTxRow>,
     pub blocks: Vec<BlockRow>,
-    pub transactions: Vec<(String, String)>,
+    pub transactions: Vec<GarageTransaction>,
     pub actions: Vec<ActionRow>,
     pub events: Vec<EventRow>,
 }
@@ -77,12 +77,12 @@ pub struct TransactionsData {
     pub rows: TxRows,
     pub commit_handlers: Vec<tokio::task::JoinHandle<Result<(), anyhow::Error>>>,
     pub commit_semaphore: Arc<Semaphore>,
-    pub garage: Arc<aws_sdk_s3::Client>,
+    pub garage: Arc<K2vClient>,
     pub db: Arc<ClickDB>,
 }
 
 impl TransactionsData {
-    pub fn new(is_backfill: bool, garage: Arc<aws_sdk_s3::Client>, db: Arc<ClickDB>) -> Self {
+    pub fn new(is_backfill: bool, garage: Arc<K2vClient>, db: Arc<ClickDB>) -> Self {
         let commit_every_block = env::var("COMMIT_EVERY_BLOCK")
             .map(|v| v == "true")
             .unwrap_or(false);
@@ -552,10 +552,11 @@ impl TransactionsData {
         }
         mem::swap(&mut accounts, &mut transaction.committed_account_tx_rows);
 
-        self.rows.transactions.push((
-            transaction.transaction_hash().to_string(),
-            serde_json::to_string(&transaction.transaction).unwrap(),
-        ));
+        self.rows.transactions.push(GarageTransaction {
+            tx_hash: transaction.transaction_hash().to_string(),
+            last_block_height: transaction.last_block_height,
+            transaction: serde_json::to_vec(&transaction.transaction).unwrap(),
+        });
     }
 
     pub async fn maybe_commit(&mut self, block_height: BlockHeight) -> anyhow::Result<()> {
@@ -606,11 +607,11 @@ impl TransactionsData {
                 // Commit to garage first
                 let start = std::time::Instant::now();
                 let cnt = rows.transactions.len();
-                insert_transactions_to_s3(&garage, rows.transactions).await?;
+                insert_transactions_to_garage(&garage, rows.transactions).await?;
                 let duration = start.elapsed().as_millis();
                 tracing::log::info!(
                     target: CLICKHOUSE_TARGET,
-                    "({} ms) Inserted {} transactions to S3",
+                    "({} ms) Inserted {} transactions to Garage",
                     duration,
                     cnt,
                 );

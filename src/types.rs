@@ -547,3 +547,10 @@ pub struct EventRow {
     pub data_token_id: Option<String>,
     pub data_amount: Option<u128>,
 }
+
+#[derive(Clone)]
+pub struct GarageTransaction {
+    pub tx_hash: String,
+    pub last_block_height: BlockHeight,
+    pub transaction: Vec<u8>,
+}
