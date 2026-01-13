@@ -88,14 +88,10 @@ impl TransactionsData {
             .unwrap_or(false);
         let tx_cache = TxCache::new();
 
-        let max_commit_handlers = if is_backfill {
-            env::var("MAX_COMMIT_HANDLERS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(MAX_COMMIT_HANDLERS)
-        } else {
-            1
-        };
+        let max_commit_handlers = env::var("MAX_COMMIT_HANDLERS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(MAX_COMMIT_HANDLERS);
         let commit_semaphore = Arc::new(Semaphore::new(max_commit_handlers));
 
         Self {
@@ -196,7 +192,7 @@ impl TransactionsData {
                         },
                         pending_receipt_ids,
                         committed_tx_row: None,
-                        committed_account_tx_rows: Default::default(),
+                        committed_account_tx_rows: Accounts::new(),
                     };
                     tx_index += 1;
                     let pending_receipt_ids = pending_transaction.pending_receipt_ids.clone();
@@ -533,20 +529,26 @@ impl TransactionsData {
         }
 
         if is_success {
-            for row in accounts.0.values_mut() {
+            for row in accounts.accounts.values_mut() {
                 row.is_success = true;
             }
         }
-        for (account_id, row) in accounts.0.iter_mut() {
+        for (account_id, row) in accounts.accounts.iter_mut() {
             row.account_id = account_id.clone();
+            row.last_block_height = transaction.last_block_height;
             row.tx_block_height = transaction.tx_block_height;
             row.tx_block_timestamp = transaction.tx_block_timestamp;
             row.transaction_hash = tx_hash.clone();
             row.tx_index = transaction.tx_index;
         }
 
-        for row in accounts.0.values() {
-            if transaction.committed_account_tx_rows.0.get(&row.account_id) != Some(row) {
+        for row in accounts.accounts.values() {
+            if transaction
+                .committed_account_tx_rows
+                .accounts
+                .get(&row.account_id)
+                != Some(row)
+            {
                 self.rows.account_txs.push(row.clone());
             }
         }

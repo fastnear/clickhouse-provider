@@ -66,6 +66,7 @@ pub struct TransactionRow {
 /*
     account_id            String COMMENT 'The account ID',
     transaction_hash      String COMMENT 'The transaction hash',
+    last_block_height     UInt64 COMMENT 'The block height when the account was last updated',
     tx_block_height       UInt64 COMMENT 'The block height when the transaction was included into the blockchain',
     tx_block_timestamp    DateTime64(9, 'UTC') COMMENT 'The block timestamp in UTC when the transaction was included',
     tx_index              UInt32 COMMENT 'The index of the transaction in the block',
@@ -86,6 +87,7 @@ pub struct TransactionRow {
 pub struct AccountTxRow {
     pub account_id: String,
     pub transaction_hash: String,
+    pub last_block_height: u64,
     pub tx_block_height: u64,
     pub tx_block_timestamp: u64,
     pub tx_index: u32,
@@ -297,12 +299,20 @@ pub struct TransactionView {
     pub data_receipts: Vec<ImprovedReceiptView>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
-pub struct Accounts(pub HashMap<String, AccountTxRow>);
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Accounts {
+    pub accounts: HashMap<String, AccountTxRow>,
+}
 
 impl Accounts {
+    pub fn new() -> Self {
+        Self {
+            accounts: HashMap::new(),
+        }
+    }
+
     pub fn row(&mut self, account_id: &str) -> &mut AccountTxRow {
-        self.0.entry(account_id.to_string()).or_default()
+        self.accounts.entry(account_id.to_string()).or_default()
     }
 }
 

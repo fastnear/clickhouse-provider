@@ -30,7 +30,7 @@ CREATE TABLE transactions
     INDEX              signer_id_bloom_index signer_id TYPE bloom_filter() GRANULARITY 1,
     INDEX              tx_block_height_minmax_idx tx_block_height TYPE minmax GRANULARITY 1,
     INDEX              tx_block_timestamp_minmax_idx tx_block_timestamp TYPE minmax GRANULARITY 1,
-) ENGINE = ReplacingMergeTree
+) ENGINE = ReplacingMergeTree(last_block_height)
 PARTITION BY toYYYYMM(tx_block_timestamp)
 PRIMARY KEY (tx_block_height)
 ORDER BY (tx_block_height, tx_index)
@@ -39,6 +39,7 @@ CREATE TABLE account_txs
 (
     account_id            String COMMENT 'The account ID',
     transaction_hash      String COMMENT 'The transaction hash',
+    last_block_height     UInt64 COMMENT 'The block height when the account was last updated',
     tx_block_height       UInt64 COMMENT 'The block height when the transaction was included into the blockchain',
     tx_block_timestamp    DateTime64(9, 'UTC') COMMENT 'The block timestamp in UTC when the transaction was included',
     tx_index              UInt32 COMMENT 'The index of the transaction in the block',
@@ -58,7 +59,7 @@ CREATE TABLE account_txs
     INDEX                 tx_block_timestamp_minmax_idx tx_block_timestamp TYPE minmax GRANULARITY 1,
     INDEX                 tx_block_height_minmax_idx tx_block_height TYPE minmax GRANULARITY 1,
 
-) ENGINE = ReplacingMergeTree
+) ENGINE = ReplacingMergeTree(last_block_height)
 PARTITION BY toYYYYMM(tx_block_timestamp)
 PRIMARY KEY (account_id, tx_block_height)
 ORDER BY (account_id, tx_block_height, tx_index)
