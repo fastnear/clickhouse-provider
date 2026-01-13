@@ -558,9 +558,16 @@ pub struct EventRow {
     pub data_amount: Option<u128>,
 }
 
-#[derive(Clone)]
-pub struct GarageTransaction {
-    pub tx_hash: String,
+/**
+    transaction_hash   String COMMENT 'Transaction hash',
+    tx_block_timestamp DateTime64(9, 'UTC') COMMENT 'The block timestamp in UTC when the transaction was included',
+    last_block_height  UInt64 COMMENT 'The block height when the last receipt was processed for the transaction',
+    data               String COMMENT 'The zstd compressed raw transaction data',
+**/
+#[derive(Row, Serialize, Deserialize, Clone, Debug)]
+pub struct RawTransactionRow {
+    pub transaction_hash: String,
+    pub tx_block_timestamp: u64,
     pub last_block_height: BlockHeight,
-    pub transaction: Vec<u8>,
+    pub data: Vec<u8>,
 }

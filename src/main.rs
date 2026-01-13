@@ -2,11 +2,8 @@ mod actions;
 mod click;
 mod common;
 
-mod k2v_tools;
 mod transactions;
 mod types;
-
-mod k2v_client;
 
 use crate::click::*;
 use crate::transactions::TransactionsData;
@@ -17,7 +14,6 @@ use fastnear_neardata_fetcher::fetcher;
 use fastnear_primitives::block_with_tx_hash::*;
 use fastnear_primitives::near_primitives::types::BlockHeight;
 use fastnear_primitives::types::ChainId;
-use k2v_client::{K2vClient, K2vClientConfig};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
 use tokio::try_join;
@@ -70,45 +66,6 @@ async fn main() {
         .await
         .expect("Failed to connect to Clickhouse");
 
-    let config = K2vClientConfig {
-        endpoint: std::env::var("K2V_ENDPOINT").expect("No K2V_ENDPOINT provided"),
-        bucket: std::env::var("K2V_BUCKET").expect("No K2V_BUCKET provided"),
-        region: std::env::var("AWS_REGION").expect("No AWS_REGION provided"),
-        aws_access_key_id: std::env::var("AWS_ACCESS_KEY_ID")
-            .expect("No AWS_ACCESS_KEY_ID provided"),
-        aws_secret_access_key: std::env::var("AWS_SECRET_ACCESS_KEY")
-            .expect("No AWS_SECRET_ACCESS_KEY provided"),
-        user_agent: None,
-        default_timeout: Some(std::time::Duration::from_secs(60)),
-    };
-    let garage = Arc::new(K2vClient::new(config).expect("Failed to create garage k2v client"));
-    let _val = garage
-        .read_index(k2v_client::Filter {
-            start: None,
-            end: None,
-            prefix: None,
-            limit: Some(1),
-            reverse: false,
-        })
-        .await
-        .expect("Failed to read index");
-
-    // garage.read_batch(&[
-    //     BatchReadOp {
-    //         partition_key: "",
-    //         filter: Filter {
-    //             start: None,
-    //             end: None,
-    //             prefix: None,
-    //             limit: Some(1),
-    //             reverse: true,
-    //         },
-    //         single_item: true,
-    //         conflicts_only: false,
-    //         tombstones: false,
-    //     }
-    // ]);
-
     let client = reqwest::Client::new();
     let chain_id = ChainId::try_from(std::env::var("CHAIN_ID").expect("CHAIN_ID is not set"))
         .expect("Invalid chain id");
@@ -136,8 +93,7 @@ async fn main() {
             .expect("Failed to parse end backfill block height")
     });
 
-    let transactions_data =
-        TransactionsData::new(end_backfill_block_height.is_some(), garage, db.clone());
+    let transactions_data = TransactionsData::new(end_backfill_block_height.is_some(), db.clone());
     let db_last_block_height = transactions_data
         .last_block_in_range(
             &db,

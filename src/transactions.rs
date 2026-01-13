@@ -7,7 +7,6 @@ use fastnear_primitives::near_primitives::types::{AccountId, BlockHeight};
 use fastnear_primitives::near_primitives::views::{ActionView, ReceiptEnumView};
 
 use crate::actions::extract_rows;
-use crate::k2v_tools::insert_transactions_to_garage;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
@@ -59,7 +58,7 @@ pub struct TxRows {
     pub account_txs: Vec<AccountTxRow>,
     pub receipt_txs: Vec<ReceiptTxRow>,
     pub blocks: Vec<BlockRow>,
-    pub transactions: Vec<GarageTransaction>,
+    pub raw_tx_rows: Vec<RawTransactionRow>,
     pub actions: Vec<ActionRow>,
     pub events: Vec<EventRow>,
 }
@@ -77,12 +76,11 @@ pub struct TransactionsData {
     pub rows: TxRows,
     pub commit_handlers: Vec<tokio::task::JoinHandle<Result<(), anyhow::Error>>>,
     pub commit_semaphore: Arc<Semaphore>,
-    pub garage: Arc<K2vClient>,
     pub db: Arc<ClickDB>,
 }
 
 impl TransactionsData {
-    pub fn new(is_backfill: bool, garage: Arc<K2vClient>, db: Arc<ClickDB>) -> Self {
+    pub fn new(is_backfill: bool, db: Arc<ClickDB>) -> Self {
         let commit_every_block = env::var("COMMIT_EVERY_BLOCK")
             .map(|v| v == "true")
             .unwrap_or(false);
@@ -101,7 +99,6 @@ impl TransactionsData {
             rows: TxRows::default(),
             commit_handlers: vec![],
             commit_semaphore,
-            garage,
             db,
         }
     }
@@ -554,10 +551,13 @@ impl TransactionsData {
         }
         mem::swap(&mut accounts, &mut transaction.committed_account_tx_rows);
 
-        self.rows.transactions.push(GarageTransaction {
-            tx_hash: transaction.transaction_hash().to_string(),
+        let encoded_tx = serde_json::to_vec(&transaction.transaction).unwrap();
+
+        self.rows.raw_tx_rows.push(RawTransactionRow {
+            transaction_hash: transaction.transaction_hash().to_string(),
+            tx_block_timestamp: transaction.tx_block_timestamp,
             last_block_height: transaction.last_block_height,
-            transaction: serde_json::to_vec(&transaction.transaction).unwrap(),
+            data: zstd::encode_all(&encoded_tx[..], 3).expect("zstd encode error"),
         });
     }
 
@@ -572,7 +572,7 @@ impl TransactionsData {
                 self.rows.account_txs.len(),
                 self.rows.receipt_txs.len(),
                 self.rows.blocks.len(),
-                self.rows.transactions.len(),
+                self.rows.raw_tx_rows.len(),
                 self.rows.actions.len(),
                 self.rows.events.len(),
             );
@@ -602,25 +602,12 @@ impl TransactionsData {
         }
         let permit = self.commit_semaphore.clone().acquire_owned().await?;
         let db = self.db.clone();
-        let garage = self.garage.clone();
         let handler = tokio::spawn(async move {
             let _permit = permit;
-            if !rows.transactions.is_empty() {
-                // Commit to garage first
-                let start = std::time::Instant::now();
-                let cnt = rows.transactions.len();
-                insert_transactions_to_garage(&garage, rows.transactions).await?;
-                let duration = start.elapsed().as_millis();
-                tracing::log::info!(
-                    target: CLICKHOUSE_TARGET,
-                    "({} ms) Inserted {} transactions to Garage",
-                    duration,
-                    cnt,
-                );
-            }
-            let start = std::time::Instant::now();
 
-            tokio::try_join!(
+            let start = std::time::Instant::now();
+            try_join!(
+                insert_rows_with_retry(&db.client, &rows.raw_tx_rows, "raw_tx"),
                 insert_rows_with_retry(&db.client, &rows.tx_rows, "transactions"),
                 insert_rows_with_retry(&db.client, &rows.account_txs, "account_txs"),
                 insert_rows_with_retry(&db.client, &rows.receipt_txs, "receipt_txs"),
@@ -631,8 +618,9 @@ impl TransactionsData {
             let duration = start.elapsed().as_millis();
             tracing::log::info!(
                 target: CLICKHOUSE_TARGET,
-                "({} ms) Committed {} tx_rows, {} account_txs, {} receipts_txs, {} blocks, {} actions, {} events",
+                "({} ms) Committed {} raw_tx_rows, {} tx_rows, {} account_txs, {} receipts_txs, {} blocks, {} actions, {} events",
                 duration,
+                rows.raw_tx_rows.len(),
                 rows.tx_rows.len(),
                 rows.account_txs.len(),
                 rows.receipt_txs.len(),

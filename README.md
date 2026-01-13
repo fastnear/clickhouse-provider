@@ -2,9 +2,27 @@
 
 The explorer is transaction focused. Everything is bundled around transactions.
 
-```sql
+```clickhouse
 -- This is a ClickHouse table.
-CREATE TABLE transactions
+CREATE TABLE local_raw_tx ON CLUSTER '{cluster}'
+(
+    transaction_hash   String COMMENT 'Transaction hash',
+    tx_block_timestamp DateTime64(9, 'UTC') COMMENT 'The block timestamp in UTC when the transaction was included',
+    last_block_height  UInt64 COMMENT 'The block height when the last receipt was processed for the transaction',
+    data               String COMMENT 'The zstd compressed raw transaction data' CODEC (NONE),
+
+) ENGINE = ReplicatedReplacingMergeTree('/clickhouse/tables/{shard}/default/local_raw_tx', '{replica}',
+                                        last_block_height)
+      PARTITION BY toYYYYMM(tx_block_timestamp)
+      PRIMARY KEY (transaction_hash)
+      ORDER BY (transaction_hash)
+      SETTINGS
+          index_granularity = 128,
+          index_granularity_bytes = 0, -- Disable adaptive granularity, use fixed 128 rows
+          min_bytes_for_wide_part = 0, -- Force wide parts format
+          min_rows_for_wide_part = 0 -- Force wide parts format
+
+CREATE TABLE local_transactions ON CLUSTER '{cluster}'
 (
     transaction_hash   String COMMENT 'Transaction hash',
     signer_id          String COMMENT 'The account ID of the transaction signer',
@@ -26,16 +44,17 @@ CREATE TABLE transactions
     gas_burnt          UInt64 COMMENT 'The amount of burnt gas for the execution of the whole transaction',
     tokens_burnt       UInt128 COMMENT 'The amount of tokens in yoctoNEAR burnt for the execution of the whole transaction',
 
-    INDEX              transaction_hash_bloom_index transaction_hash TYPE bloom_filter() GRANULARITY 1,
-    INDEX              signer_id_bloom_index signer_id TYPE bloom_filter() GRANULARITY 1,
-    INDEX              tx_block_height_minmax_idx tx_block_height TYPE minmax GRANULARITY 1,
-    INDEX              tx_block_timestamp_minmax_idx tx_block_timestamp TYPE minmax GRANULARITY 1,
-) ENGINE = ReplacingMergeTree(last_block_height)
-PARTITION BY toYYYYMM(tx_block_timestamp)
-PRIMARY KEY (tx_block_height)
-ORDER BY (tx_block_height, tx_index)
+    INDEX transaction_hash_bloom_index transaction_hash TYPE bloom_filter() GRANULARITY 1,
+    INDEX signer_id_bloom_index signer_id TYPE bloom_filter() GRANULARITY 1,
+    INDEX tx_block_height_minmax_idx tx_block_height TYPE minmax GRANULARITY 1,
+    INDEX tx_block_timestamp_minmax_idx tx_block_timestamp TYPE minmax GRANULARITY 1,
+) ENGINE = ReplicatedReplacingMergeTree('/clickhouse/tables/{shard}/default/local_transactions', '{replica}',
+                                        last_block_height)
+      PARTITION BY toYYYYMM(tx_block_timestamp)
+      PRIMARY KEY (tx_block_height)
+      ORDER BY (tx_block_height, tx_index)
 
-CREATE TABLE account_txs
+CREATE TABLE local_account_txs ON CLUSTER '{cluster}'
 (
     account_id            String COMMENT 'The account ID',
     transaction_hash      String COMMENT 'The transaction hash',
@@ -56,15 +75,16 @@ CREATE TABLE account_txs
     is_event_log          Bool COMMENT 'True if the account was involved in JSON event logs',
     is_success            Bool COMMENT 'Whether the transaction execution was successful or not. Pending transactions are considered not successful',
 
-    INDEX                 tx_block_timestamp_minmax_idx tx_block_timestamp TYPE minmax GRANULARITY 1,
-    INDEX                 tx_block_height_minmax_idx tx_block_height TYPE minmax GRANULARITY 1,
+    INDEX tx_block_timestamp_minmax_idx tx_block_timestamp TYPE minmax GRANULARITY 1,
+    INDEX tx_block_height_minmax_idx tx_block_height TYPE minmax GRANULARITY 1,
 
-) ENGINE = ReplacingMergeTree(last_block_height)
-PARTITION BY toYYYYMM(tx_block_timestamp)
-PRIMARY KEY (account_id, tx_block_height)
-ORDER BY (account_id, tx_block_height, tx_index)
+) ENGINE = ReplicatedReplacingMergeTree('/clickhouse/tables/{shard}/default/local_account_txs', '{replica}',
+                                        last_block_height)
+      PARTITION BY toYYYYMM(tx_block_timestamp)
+      PRIMARY KEY (account_id, tx_block_height)
+      ORDER BY (account_id, tx_block_height, tx_index)
 
-CREATE TABLE receipt_txs
+CREATE TABLE local_receipt_txs ON CLUSTER '{cluster}'
 (
     receipt_id           String COMMENT 'The receipt hash',
     block_height         UInt64 COMMENT 'The block height when the receipt was executed',
@@ -83,14 +103,14 @@ CREATE TABLE receipt_txs
     shard_id             UInt64 COMMENT 'The shard ID where the receipt was executed',
     is_success           Bool COMMENT 'Whether the receipt execution was successful or not',
 
-    INDEX                receipt_id_bloom_index receipt_id TYPE bloom_filter() GRANULARITY 1,
-    INDEX                tx_block_timestamp_minmax_idx tx_block_height TYPE minmax GRANULARITY 1,
-) ENGINE = ReplacingMergeTree
-PARTITION BY toYYYYMM(block_timestamp)
-PRIMARY KEY (block_height, receipt_index)
-ORDER BY (block_height, receipt_index, receipt_id)
+    INDEX receipt_id_bloom_index receipt_id TYPE bloom_filter() GRANULARITY 1,
+    INDEX tx_block_timestamp_minmax_idx tx_block_height TYPE minmax GRANULARITY 1,
+) ENGINE = ReplicatedReplacingMergeTree('/clickhouse/tables/{shard}/default/local_receipt_txs', '{replica}')
+      PARTITION BY toYYYYMM(block_timestamp)
+      PRIMARY KEY (block_height, receipt_index)
+      ORDER BY (block_height, receipt_index, receipt_id)
 
-CREATE TABLE blocks
+CREATE TABLE local_blocks ON CLUSTER '{cluster}'
 (
     block_height      UInt64 COMMENT 'The block height',
     prev_block_height Nullable(UInt64) COMMENT 'The previous block height',
@@ -110,18 +130,18 @@ CREATE TABLE blocks
     gas_burnt         UInt64 COMMENT 'The total gas burnt in the block',
     tokens_burnt      UInt128 COMMENT 'The total tokens burnt in yoctoNEAR in the block',
 
-    INDEX             block_timestamp_minmax_idx block_timestamp TYPE minmax GRANULARITY 1,
-    INDEX             author_id_bloom_index author_id TYPE bloom_filter() GRANULARITY 1,
-    INDEX             epoch_id_bloom_index epoch_id TYPE bloom_filter() GRANULARITY 1,
-    INDEX             block_hash_bloom_index block_hash TYPE bloom_filter() GRANULARITY 1,
-    INDEX             protocol_version_minmax_idx protocol_version TYPE minmax GRANULARITY 1,
-) ENGINE = ReplacingMergeTree
-PARTITION BY toYYYYMM(block_timestamp)
-PRIMARY KEY (block_height)
-ORDER BY (block_height)
+    INDEX block_timestamp_minmax_idx block_timestamp TYPE minmax GRANULARITY 1,
+    INDEX author_id_bloom_index author_id TYPE bloom_filter() GRANULARITY 1,
+    INDEX epoch_id_bloom_index epoch_id TYPE bloom_filter() GRANULARITY 1,
+    INDEX block_hash_bloom_index block_hash TYPE bloom_filter() GRANULARITY 1,
+    INDEX protocol_version_minmax_idx protocol_version TYPE minmax GRANULARITY 1,
+) ENGINE = ReplicatedReplacingMergeTree('/clickhouse/tables/{shard}/default/local_blocks', '{replica}')
+      PARTITION BY toYYYYMM(block_timestamp)
+      PRIMARY KEY (block_height)
+      ORDER BY (block_height)
 
 -- This is a ClickHouse table.
-CREATE TABLE actions
+CREATE TABLE local_actions ON CLUSTER '{cluster}'
 (
     receipt_id             String COMMENT 'The receipt hash',
     block_height           UInt64 COMMENT 'The block height when the receipt was executed',
@@ -168,14 +188,14 @@ CREATE TABLE actions
     args_nft_contract_id   Nullable(String) COMMENT '`nft_contract_id` argument from the JSON arguments if the action is FunctionCall (valid account ID)',
     args_nft_token_id      Nullable(String) COMMENT '`nft_token_id` argument from the JSON arguments if the action is FunctionCall (truncated to 160 characters)',
 
-    INDEX                  block_timestamp_minmax_idx block_timestamp TYPE minmax GRANULARITY 1,
-    INDEX                  receiver_id_bloom_index receiver_id TYPE bloom_filter() GRANULARITY 1,
-) ENGINE = ReplacingMergeTree
-PARTITION BY toYYYYMM(block_timestamp)
-PRIMARY KEY (block_height, block_action_index)
-ORDER BY (block_height, block_action_index)
+    INDEX block_timestamp_minmax_idx block_timestamp TYPE minmax GRANULARITY 1,
+    INDEX receiver_id_bloom_index receiver_id TYPE bloom_filter() GRANULARITY 1,
+) ENGINE = ReplicatedReplacingMergeTree('/clickhouse/tables/{shard}/default/local_actions', '{replica}')
+      PARTITION BY toYYYYMM(block_timestamp)
+      PRIMARY KEY (block_height, block_action_index)
+      ORDER BY (block_height, block_action_index)
 
-CREATE TABLE events
+CREATE TABLE local_events ON CLUSTER '{cluster}'
 (
     receipt_id                  String COMMENT 'The receipt hash',
     block_height                UInt64 COMMENT 'The block height when the receipt was executed',
@@ -207,10 +227,42 @@ CREATE TABLE events
     data_token_id               Nullable(String) COMMENT '`token_id` field from the first data object in the JSON event (truncated to 160 characters). For MT standard, the first `token_id` from `token_ids` array, when `token_id` does not exist. For DIP-4 standard, the first key from `tokens` map, or `token` if only single token transfer',
     data_amount                 Nullable(UInt128) COMMENT '`amount` field from the first data object in the JSON event. For MT standard, the first `amount` from `amounts` array, when `amount` does not exist. For DIP-4 standard, the first value from `amounts` map',
 
-    INDEX                       block_timestamp_minmax_idx block_timestamp TYPE minmax GRANULARITY 1,
-    INDEX                       receiver_id_bloom_index receiver_id TYPE bloom_filter() GRANULARITY 1,
-) ENGINE = ReplacingMergeTree
-PARTITION BY toYYYYMM(block_timestamp)
-PRIMARY KEY (block_height, block_data_index)
-ORDER BY (block_height, block_data_index)
+    INDEX block_timestamp_minmax_idx block_timestamp TYPE minmax GRANULARITY 1,
+    INDEX receiver_id_bloom_index receiver_id TYPE bloom_filter() GRANULARITY 1,
+) ENGINE = ReplicatedReplacingMergeTree('/clickhouse/tables/{shard}/default/local_events', '{replica}')
+      PARTITION BY toYYYYMM(block_timestamp)
+      PRIMARY KEY (block_height, block_data_index)
+      ORDER BY (block_height, block_data_index)
+```
+
+# Distributed Tables
+
+```clickhouse
+CREATE TABLE default.raw_tx ON CLUSTER '{cluster}'
+    AS default.local_raw_tx
+        ENGINE = Distributed('{cluster}', default, local_raw_tx, cityHash64(transaction_hash));
+
+CREATE TABLE default.transactions ON CLUSTER '{cluster}'
+    AS default.local_transactions
+        ENGINE = Distributed('{cluster}', default, local_transactions, cityHash64(tx_block_height));
+
+CREATE TABLE default.account_txs ON CLUSTER '{cluster}'
+    AS default.local_account_txs
+        ENGINE = Distributed('{cluster}', default, local_account_txs, cityHash64(account_id));
+
+CREATE TABLE default.receipt_txs ON CLUSTER '{cluster}'
+    AS default.local_receipt_txs
+        ENGINE = Distributed('{cluster}', default, local_receipt_txs, cityHash64(block_height));
+
+CREATE TABLE default.blocks ON CLUSTER '{cluster}'
+    AS default.local_blocks
+        ENGINE = Distributed('{cluster}', default, local_blocks, cityHash64(block_height));
+
+CREATE TABLE default.actions ON CLUSTER '{cluster}'
+    AS default.local_actions
+        ENGINE = Distributed('{cluster}', default, local_actions, cityHash64(block_height));
+
+CREATE TABLE default.events ON CLUSTER '{cluster}'
+    AS default.local_events
+        ENGINE = Distributed('{cluster}', default, local_events, cityHash64(block_height));
 ```
