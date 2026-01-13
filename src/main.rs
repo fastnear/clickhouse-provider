@@ -52,15 +52,6 @@ async fn main() {
 
     tracing::log::info!(target: PROJECT_ID, "Starting Clickhouse Provider");
 
-    let rayon_threads = std::env::var("RAYON_NUM_THREADS")
-        .unwrap_or_else(|_| "8".to_string())
-        .parse::<usize>()
-        .expect("Invalid RAYON_NUM_THREADS");
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(rayon_threads) // Use 8 threads for compression
-        .build_global()
-        .unwrap();
-
     let db = Arc::new(ClickDB::new(10000));
     db.verify_connection()
         .await
