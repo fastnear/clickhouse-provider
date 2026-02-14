@@ -44,7 +44,7 @@ CREATE TABLE local_transactions ON CLUSTER '{cluster}'
     gas_burnt          UInt64 COMMENT 'The amount of burnt gas for the execution of the whole transaction',
     tokens_burnt       UInt128 COMMENT 'The amount of tokens in yoctoNEAR burnt for the execution of the whole transaction',
 
-    INDEX transaction_hash_bloom_index transaction_hash TYPE bloom_filter() GRANULARITY 1,
+    INDEX transaction_hash_bloom_index transaction_hash TYPE bloom_filter(0.001) GRANULARITY 1,
     INDEX signer_id_bloom_index signer_id TYPE bloom_filter() GRANULARITY 1,
     INDEX tx_block_height_minmax_idx tx_block_height TYPE minmax GRANULARITY 1,
     INDEX tx_block_timestamp_minmax_idx tx_block_timestamp TYPE minmax GRANULARITY 1,
@@ -103,7 +103,7 @@ CREATE TABLE local_receipt_txs ON CLUSTER '{cluster}'
     shard_id             UInt64 COMMENT 'The shard ID where the receipt was executed',
     is_success           Bool COMMENT 'Whether the receipt execution was successful or not',
 
-    INDEX receipt_id_bloom_index receipt_id TYPE bloom_filter() GRANULARITY 1,
+    INDEX receipt_id_bloom_index receipt_id TYPE bloom_filter(0.001) GRANULARITY 1,
     INDEX tx_block_timestamp_minmax_idx tx_block_height TYPE minmax GRANULARITY 1,
 ) ENGINE = ReplicatedReplacingMergeTree('/clickhouse/tables/{shard}/default/local_receipt_txs', '{replica}')
       PARTITION BY toYYYYMM(block_timestamp)
