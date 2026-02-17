@@ -44,7 +44,7 @@ CREATE TABLE local_transactions ON CLUSTER '{cluster}'
     gas_burnt          UInt64 COMMENT 'The amount of burnt gas for the execution of the whole transaction',
     tokens_burnt       UInt128 COMMENT 'The amount of tokens in yoctoNEAR burnt for the execution of the whole transaction',
 
-    INDEX transaction_hash_bloom_index transaction_hash TYPE bloom_filter(0.001) GRANULARITY 1,
+    INDEX transaction_hash_bloom_index transaction_hash TYPE bloom_filter(0.00001) GRANULARITY 1,
     INDEX signer_id_bloom_index signer_id TYPE bloom_filter() GRANULARITY 1,
     INDEX tx_block_height_minmax_idx tx_block_height TYPE minmax GRANULARITY 1,
     INDEX tx_block_timestamp_minmax_idx tx_block_timestamp TYPE minmax GRANULARITY 1,
@@ -103,7 +103,7 @@ CREATE TABLE local_receipt_txs ON CLUSTER '{cluster}'
     shard_id             UInt64 COMMENT 'The shard ID where the receipt was executed',
     is_success           Bool COMMENT 'Whether the receipt execution was successful or not',
 
-    INDEX receipt_id_bloom_index receipt_id TYPE bloom_filter(0.001) GRANULARITY 1,
+    INDEX receipt_id_bloom_index receipt_id TYPE bloom_filter(0.00001) GRANULARITY 1,
     INDEX tx_block_timestamp_minmax_idx tx_block_height TYPE minmax GRANULARITY 1,
 ) ENGINE = ReplicatedReplacingMergeTree('/clickhouse/tables/{shard}/default/local_receipt_txs', '{replica}')
       PARTITION BY toYYYYMM(block_timestamp)
@@ -265,4 +265,46 @@ CREATE TABLE default.actions ON CLUSTER '{cluster}'
 CREATE TABLE default.events ON CLUSTER '{cluster}'
     AS default.local_events
         ENGINE = Distributed('{cluster}', default, local_events, cityHash64(block_height));
+```
+
+# Optimization for quick blocks
+
+```clickhouse
+CREATE TABLE local_blocks_latest ON CLUSTER '{cluster}'
+(
+    -- same columns as local_blocks
+    block_height      UInt64,
+    prev_block_height Nullable(UInt64),
+    block_hash        String,
+    prev_block_hash   String,
+    block_timestamp   DateTime64(9, 'UTC'),
+    epoch_id          String,
+    next_epoch_id     String,
+    chunks_included   UInt64,
+    author_id         String,
+    protocol_version  UInt32,
+    gas_price         UInt128,
+    block_ordinal     Nullable(UInt64),
+    total_supply      UInt128,
+    num_transactions  UInt32,
+    num_receipts      UInt32,
+    gas_burnt         UInt64,
+    tokens_burnt      UInt128
+) ENGINE = ReplicatedReplacingMergeTree(
+            '/clickhouse/tables/{shard}/default/local_blocks_latest', '{replica}'
+           )
+      ORDER BY block_height
+      TTL toDateTime(block_timestamp) + INTERVAL 1 HOUR
+      SETTINGS ttl_only_drop_parts = 0;
+
+CREATE MATERIALIZED VIEW local_blocks_latest_mv
+            ON CLUSTER '{cluster}'
+            TO local_blocks_latest
+AS
+SELECT *
+FROM local_blocks;
+
+CREATE TABLE default.blocks_latest ON CLUSTER '{cluster}'
+    AS default.local_blocks_latest
+        ENGINE = Distributed('{cluster}', default, local_blocks_latest, cityHash64(block_height));
 ```
