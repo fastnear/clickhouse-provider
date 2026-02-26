@@ -9,7 +9,7 @@ edition = "2021"
 anyhow = "1.0.51"
 
 openssl-probe = { version = "0.1.5" }
-tokio = { version = "1", features = ["time", "sync", "rt-multi-thread"] }
+tokio = { version = "1", features = ["time", "sync", "rt-multi-thread", "signal"] }
 
 dotenv = "0.15.0"
 tracing = { version = "0.1.13", features = ["log"] }
@@ -29,7 +29,6 @@ fastnear-neardata-fetcher = "0.34.5"
 clickhouse = { version = "0.13", features = ["native-tls", "lz4"] }
 reqwest = { version = "0.12.2", features = ["json"] }
 
-signal-hook = "0.3.18"
 zstd = "0.13.3"
 
 

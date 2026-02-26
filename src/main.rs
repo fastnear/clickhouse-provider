@@ -31,21 +31,17 @@ async fn main() {
     let is_running = Arc::new(AtomicBool::new(true));
     let ctrl_c_running = is_running.clone();
     let signal_handle = tokio::spawn(async move {
-        let mut signals = signal_hook::iterator::Signals::new(&[
-            signal_hook::consts::SIGTERM,
-            signal_hook::consts::SIGINT,
-        ])
-        .unwrap();
-        for sig in signals.forever() {
-            match sig {
-                signal_hook::consts::SIGTERM | signal_hook::consts::SIGINT => {
-                    println!("Received signal {}, shutting down...", sig);
-                    ctrl_c_running.store(false, Ordering::SeqCst);
-                    break;
-                }
-                _ => unreachable!(),
+        let mut sigterm =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                println!("Received SIGINT, shutting down...");
+            }
+            _ = sigterm.recv() => {
+                println!("Received SIGTERM, shutting down...");
             }
         }
+        ctrl_c_running.store(false, Ordering::SeqCst);
     });
 
     common::setup_tracing("garage=info,clickhouse=info,provider=info,neardata-fetcher=info");
