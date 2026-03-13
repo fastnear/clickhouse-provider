@@ -105,6 +105,7 @@ CREATE TABLE local_receipt_txs ON CLUSTER '{cluster}'
 
     INDEX receipt_id_bloom_index receipt_id TYPE bloom_filter(0.00001) GRANULARITY 1,
     INDEX tx_block_timestamp_minmax_idx tx_block_timestamp TYPE minmax GRANULARITY 1,
+    INDEX tx_block_height_minmax_idx tx_block_height TYPE minmax GRANULARITY 1,
 ) ENGINE = ReplicatedReplacingMergeTree('/clickhouse/tables/{shard}/default/local_receipt_txs', '{replica}')
       PARTITION BY toYYYYMM(block_timestamp)
       PRIMARY KEY (block_height, receipt_index)
