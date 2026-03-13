@@ -1,22 +1,20 @@
+use crate::types::*;
 use crate::*;
-use std::collections::{HashMap, HashSet};
-use std::env;
-use std::str::FromStr;
-
-use clickhouse::Row;
+use fastnear_primitives::near_indexer_primitives::views::ExecutionStatusView;
 use fastnear_primitives::near_indexer_primitives::IndexerTransactionWithOutcome;
 use fastnear_primitives::near_primitives::hash::CryptoHash;
 use fastnear_primitives::near_primitives::types::{AccountId, BlockHeight};
-use fastnear_primitives::near_primitives::views;
-use fastnear_primitives::near_primitives::views::{
-    ActionView, ReceiptEnumView, SignedTransactionView,
-};
+use fastnear_primitives::near_primitives::views::{ActionView, ReceiptEnumView};
 
-use crate::types::{BlockInfo, ImprovedExecutionOutcome, ImprovedExecutionOutcomeWithReceipt};
-use serde::{Deserialize, Serialize};
+use crate::actions::extract_rows;
 use serde_json::Value;
+use std::collections::{HashMap, HashSet};
+use std::str::FromStr;
+use std::{env, mem};
+use tokio::sync::Semaphore;
 
 const EVENT_JSON_PREFIX: &str = "EVENT_JSON:";
+const SYSTEM_ACCOUNT_ID: &str = "system";
 
 const POTENTIAL_ACCOUNT_ARGS: [&str; 19] = [
     "receiver_id",
@@ -40,7 +38,7 @@ const POTENTIAL_ACCOUNT_ARGS: [&str; 19] = [
     "owner_account_id",
 ];
 
-const POTENTIAL_EVENTS_ARGS: [&str; 10] = [
+const POTENTIAL_EVENTS_ARGS: [&str; 11] = [
     "account_id",
     "owner_id",
     "old_owner_id",
@@ -51,97 +49,18 @@ const POTENTIAL_EVENTS_ARGS: [&str; 10] = [
     "liquidation_account_id",
     "contract_id",
     "nft_contract_id",
+    "receiver_id",
 ];
-
-#[allow(dead_code)]
-#[derive(Deserialize)]
-pub struct EventJson {
-    pub version: String,
-    pub standard: String,
-    pub event: String,
-    pub data: Vec<Value>,
-}
-
-#[derive(Row, Serialize)]
-pub struct TransactionRow {
-    pub transaction_hash: String,
-    pub signer_id: String,
-    pub tx_block_height: u64,
-    pub tx_block_hash: String,
-    pub tx_block_timestamp: u64,
-    pub transaction: String,
-    pub last_block_height: u64,
-}
-
-#[derive(Row, Serialize)]
-pub struct AccountTxRow {
-    pub account_id: String,
-    pub transaction_hash: String,
-    pub signer_id: String,
-    pub tx_block_height: u64,
-    pub tx_block_timestamp: u64,
-}
-
-#[derive(Row, Serialize, Deserialize, Clone, Debug)]
-pub struct BlockTxRow {
-    pub block_height: u64,
-    pub block_hash: String,
-    pub block_timestamp: u64,
-    pub transaction_hash: String,
-    pub signer_id: String,
-    pub tx_block_height: u64,
-}
-
-#[derive(Row, Serialize)]
-pub struct ReceiptTxRow {
-    pub receipt_id: String,
-    pub transaction_hash: String,
-    pub signer_id: String,
-    pub tx_block_height: u64,
-    pub tx_block_timestamp: u64,
-}
-
-/// Simplified block view in case there a block with no associated transactions.
-/// Also includes some extra metadata.
-#[derive(Row, Serialize, Deserialize, Clone, Debug)]
-pub struct BlockRow {
-    pub block_height: u64,
-    pub block_hash: String,
-    pub block_timestamp: u64,
-    pub prev_block_height: Option<u64>,
-    pub epoch_id: String,
-    pub chunks_included: u64,
-    pub prev_block_hash: String,
-    pub author_id: String,
-    pub signature: String,
-    pub protocol_version: u32,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct TransactionView {
-    pub transaction: SignedTransactionView,
-    pub execution_outcome: ImprovedExecutionOutcome,
-    pub receipts: Vec<ImprovedExecutionOutcomeWithReceipt>,
-    pub data_receipts: Vec<views::ReceiptView>,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct PendingTransaction {
-    pub tx_block_height: BlockHeight,
-    pub tx_block_hash: CryptoHash,
-    pub tx_block_timestamp: u64,
-    pub blocks: Vec<BlockInfo>,
-    pub transaction: TransactionView,
-    pub pending_receipt_ids: Vec<CryptoHash>,
-}
 
 #[derive(Default)]
 pub struct TxRows {
-    pub transactions: Vec<TransactionRow>,
+    pub tx_rows: Vec<TransactionRow>,
     pub account_txs: Vec<AccountTxRow>,
-    pub block_txs: Vec<BlockTxRow>,
     pub receipt_txs: Vec<ReceiptTxRow>,
     pub blocks: Vec<BlockRow>,
+    pub raw_tx_rows: Vec<RawTransactionRow>,
+    pub actions: Vec<ActionRow>,
+    pub events: Vec<EventRow>,
 }
 
 impl PendingTransaction {
@@ -152,29 +71,40 @@ impl PendingTransaction {
 
 pub struct TransactionsData {
     pub commit_every_block: bool,
+    pub is_backfill: bool,
     pub tx_cache: TxCache,
     pub rows: TxRows,
-    pub commit_handlers: Vec<tokio::task::JoinHandle<Result<(), clickhouse::error::Error>>>,
+    pub commit_handlers: Vec<tokio::task::JoinHandle<Result<(), anyhow::Error>>>,
+    pub commit_semaphore: Arc<Semaphore>,
+    pub db: Arc<ClickDB>,
 }
 
 impl TransactionsData {
-    pub fn new() -> Self {
+    pub fn new(is_backfill: bool, db: Arc<ClickDB>) -> Self {
         let commit_every_block = env::var("COMMIT_EVERY_BLOCK")
             .map(|v| v == "true")
             .unwrap_or(false);
         let tx_cache = TxCache::new();
 
+        let max_commit_handlers = env::var("MAX_COMMIT_HANDLERS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(MAX_COMMIT_HANDLERS);
+        let commit_semaphore = Arc::new(Semaphore::new(max_commit_handlers));
+
         Self {
             commit_every_block,
+            is_backfill,
             tx_cache,
             rows: TxRows::default(),
             commit_handlers: vec![],
+            commit_semaphore,
+            db,
         }
     }
 
     pub async fn process_block(
         &mut self,
-        db: &ClickDB,
         block: BlockWithTxHashes,
         last_db_block_height: BlockHeight,
         prev_block_hash: Option<CryptoHash>,
@@ -194,26 +124,45 @@ impl TransactionsData {
             block_hash: block_hash.clone(),
             block_timestamp,
         };
-        let block_row = BlockRow {
+        let mut block_row = BlockRow {
             block_height,
             block_hash: block_hash.to_string(),
             block_timestamp,
             prev_block_height: block.block.header.prev_height,
             epoch_id: block.block.header.epoch_id.to_string(),
+            next_epoch_id: block.block.header.next_epoch_id.to_string(),
             chunks_included: block.block.header.chunks_included,
             prev_block_hash: block.block.header.prev_hash.to_string(),
             author_id: block.block.author.to_string(),
-            signature: block.block.header.signature.to_string(),
             protocol_version: block.block.header.latest_protocol_version,
+            gas_price: block.block.header.gas_price.as_yoctonear(),
+            block_ordinal: block.block.header.block_ordinal,
+            total_supply: block.block.header.total_supply.as_yoctonear(),
+            num_transactions: 0,
+            num_receipts: 0,
+            gas_burnt: 0,
+            tokens_burnt: 0,
         };
 
-        let skip_missing_receipts = block_height <= last_db_block_height;
+        let mut pending_receipt_txs = vec![];
+        let mut pending_action_rows = vec![];
+        let mut pending_event_rows = vec![];
 
-        let mut complete_transactions = vec![];
+        let catching_up = block_height <= last_db_block_height;
+
+        let mut transactions_to_commit = HashSet::new();
+        let mut tx_index = 0u32;
+        let mut appear_receipt_index = 0u32;
+        let mut receipt_index = 0u32;
+        let mut block_data_index = 0u32;
+        let mut block_action_index = 0u32;
 
         let mut shards = block.shards;
         for shard in &mut shards {
             if let Some(chunk) = shard.chunk.take() {
+                let shard_id: u64 = chunk.header.shard_id.into();
+                block_row.gas_burnt += chunk.header.gas_used.as_gas();
+                block_row.tokens_burnt += chunk.header.balance_burnt.as_yoctonear();
                 for IndexerTransactionWithOutcome {
                     transaction,
                     outcome,
@@ -224,38 +173,59 @@ impl TransactionsData {
                         tx_block_height: block_height,
                         tx_block_hash: block_hash,
                         tx_block_timestamp: block_timestamp,
-                        blocks: vec![block_info.clone()],
+                        tx_index,
+                        shard_id,
+                        last_block_height: block_height,
                         transaction: TransactionView {
                             transaction,
                             execution_outcome: ImprovedExecutionOutcome::from_outcome(
                                 outcome.execution_outcome,
                                 block_timestamp,
                                 block_height,
+                                tx_index,
                             ),
                             receipts: vec![],
                             data_receipts: vec![],
                         },
                         pending_receipt_ids,
+                        committed_tx_row: None,
+                        committed_account_tx_rows: Accounts::new(),
                     };
+                    tx_index += 1;
                     let pending_receipt_ids = pending_transaction.pending_receipt_ids.clone();
                     self.tx_cache
                         .insert_transaction(pending_transaction, &pending_receipt_ids);
                 }
-                for receipt in chunk.receipts {
+                for receipt in chunk.local_receipts.into_iter().chain(chunk.receipts) {
+                    let receipt = ImprovedReceiptView::from_receipt(
+                        receipt,
+                        appear_receipt_index,
+                        &block_info,
+                    );
+                    appear_receipt_index += 1;
                     match receipt.receipt {
                         ReceiptEnumView::Action { .. } => {
-                            // skipping here, since we'll get one with execution
+                            self.tx_cache.insert_action_receipt(receipt);
                         }
                         ReceiptEnumView::Data { data_id, .. } => {
                             self.tx_cache.insert_data_receipt(&data_id, receipt);
                         }
-                        ReceiptEnumView::GlobalContractDistribution { .. } => {}
+                        ReceiptEnumView::GlobalContractDistribution { .. } => {
+                            // Global contract distribution receipts don't have the associated transaction
+                            // so we skip them here.
+                        }
                     }
                 }
             }
         }
 
         for shard in shards {
+            let shard_id: u64 = shard
+                .chunk
+                .as_ref()
+                .map(|c| c.header.shard_id)
+                .unwrap_or(shard.shard_id)
+                .into();
             for outcome in shard.receipt_execution_outcomes {
                 let receipt = outcome.receipt;
                 let execution_outcome = outcome.execution_outcome;
@@ -263,8 +233,10 @@ impl TransactionsData {
                 let tx_hash = match self.tx_cache.get_and_remove_receipt_to_tx(&receipt_id) {
                     Some(tx_hash) => tx_hash,
                     None => {
-                        if skip_missing_receipts {
+                        if catching_up {
                             tracing::log::warn!(target: PROJECT_ID, "Missing tx_hash for action receipt_id: {}", receipt_id);
+                            // Remove the action receipt from cache to avoid memory leak (if exists).
+                            self.tx_cache.remove_action_receipt(&receipt_id);
                             continue;
                         }
                         panic!(
@@ -273,80 +245,130 @@ impl TransactionsData {
                         );
                     }
                 };
-                let mut pending_transaction = self
+                let action_receipt = self
                     .tx_cache
-                    .get_and_remove_transaction(&tx_hash)
-                    .expect("Missing transaction for receipt");
+                    .remove_action_receipt(&receipt_id)
+                    .expect("Missing action receipt for an receipt execution outcome");
+                let pending_transaction = self.tx_cache.get_and_remove_transaction(&tx_hash);
+                if pending_transaction.is_none() {
+                    panic!(
+                        "Missing pending transaction for receipt_id {} tx_hash {} at block {}",
+                        receipt_id, tx_hash, block_height
+                    );
+                }
+                let mut pending_transaction = pending_transaction.unwrap();
                 pending_transaction
                     .pending_receipt_ids
                     .retain(|r| r != &receipt_id);
-                if pending_transaction
-                    .blocks
-                    .last()
-                    .as_ref()
-                    .unwrap()
-                    .block_height
-                    != block_height
-                {
-                    pending_transaction.blocks.push(block_info.clone());
-                }
+                pending_transaction.last_block_height = block_height;
 
                 // Extracting matching data receipts
                 match &receipt.receipt {
                     ReceiptEnumView::Action { input_data_ids, .. } => {
                         let mut ok = true;
                         for data_id in input_data_ids {
+                            let current_receipt_index = receipt_index;
+                            receipt_index += 1;
                             let data_receipt = match self
                                 .tx_cache
                                 .get_and_remove_data_receipt(data_id)
                             {
                                 Some(data_receipt) => data_receipt,
                                 None => {
-                                    if skip_missing_receipts {
+                                    if catching_up {
                                         tracing::log::warn!(target: PROJECT_ID, "Missing data receipt for data_id: {}", data_id);
                                         ok = false;
-                                        break;
+                                        continue;
                                     }
-                                    panic!("Missing data receipt for data_id");
+                                    panic!("Missing data receipt for data_id: {}", data_id);
                                 }
                             };
+                            if ok {
+                                pending_receipt_txs.push(ReceiptTxRow::new(
+                                    &data_receipt,
+                                    current_receipt_index,
+                                    &pending_transaction,
+                                    &block_info,
+                                    shard_id,
+                                    true,
+                                ));
 
-                            pending_transaction
-                                .transaction
-                                .data_receipts
-                                .push(data_receipt);
+                                pending_transaction
+                                    .transaction
+                                    .data_receipts
+                                    .push(data_receipt);
+                            }
                         }
                         if !ok {
                             for receipt_id in &pending_transaction.pending_receipt_ids {
                                 self.tx_cache.remove_receipt_to_tx(receipt_id);
+                                self.tx_cache.remove_action_receipt(receipt_id);
                             }
+                            receipt_index += 1;
                             continue;
                         }
                     }
                     ReceiptEnumView::Data { .. } => {
                         unreachable!("Data receipt should be processed before")
                     }
-                    ReceiptEnumView::GlobalContractDistribution { .. } => {}
+                    ReceiptEnumView::GlobalContractDistribution { .. } => {
+                        unreachable!(
+                            "GlobalContractDistribution receipt should not have execution outcome"
+                        )
+                    }
                 };
 
+                let current_receipt_index = receipt_index;
+                pending_receipt_txs.push(ReceiptTxRow::new(
+                    &action_receipt,
+                    current_receipt_index,
+                    &pending_transaction,
+                    &block_info,
+                    shard_id,
+                    matches!(
+                        execution_outcome.outcome.status,
+                        ExecutionStatusView::SuccessValue(_)
+                    ) || matches!(
+                        execution_outcome.outcome.status,
+                        ExecutionStatusView::SuccessReceiptId(_)
+                    ),
+                ));
+                receipt_index += 1;
                 let pending_receipt_ids = execution_outcome.outcome.receipt_ids.clone();
+
+                // Actions/Events
+                let (action_rows, event_rows) = extract_rows(
+                    &action_receipt,
+                    current_receipt_index,
+                    &execution_outcome.outcome,
+                    &pending_transaction,
+                    &block_info,
+                    &mut block_data_index,
+                    &mut block_action_index,
+                );
+                pending_action_rows.extend(action_rows);
+                pending_event_rows.extend(event_rows);
+
                 pending_transaction.transaction.receipts.push(
                     ImprovedExecutionOutcomeWithReceipt {
                         execution_outcome: ImprovedExecutionOutcome::from_outcome(
                             execution_outcome,
                             block_timestamp,
                             block_height,
+                            current_receipt_index,
                         ),
-                        receipt,
+                        receipt: action_receipt,
                     },
                 );
                 pending_transaction
                     .pending_receipt_ids
                     .extend(pending_receipt_ids.clone());
-                if pending_transaction.pending_receipt_ids.is_empty() {
-                    // Received the final receipt.
-                    complete_transactions.push(pending_transaction);
-                } else {
+                if !(self.is_backfill || catching_up)
+                    || pending_transaction.pending_receipt_ids.is_empty()
+                {
+                    transactions_to_commit.insert(pending_transaction.transaction_hash());
+                }
+                if !catching_up || !pending_transaction.pending_receipt_ids.is_empty() {
                     self.tx_cache
                         .insert_transaction(pending_transaction, &pending_receipt_ids);
                 }
@@ -354,163 +376,280 @@ impl TransactionsData {
         }
 
         self.tx_cache.last_block_height = block_height;
+        block_row.num_transactions = tx_index;
+        block_row.num_receipts = receipt_index;
 
-        tracing::log::info!(target: PROJECT_ID, "#{}: Complete {} transactions. Pending {}", block_height, complete_transactions.len(), self.tx_cache.stats());
+        tracing::log::info!(target: PROJECT_ID, "#{}: [{}] {} transactions to commit. Pending {}",
+            block_height,
+            if catching_up { "Catching up" } else { "Live" },
+            transactions_to_commit.len(), self.tx_cache.stats());
 
-        if block_height > last_db_block_height {
+        if !catching_up {
+            self.rows.receipt_txs.extend(pending_receipt_txs);
+            self.rows.actions.extend(pending_action_rows);
+            self.rows.events.extend(pending_event_rows);
             self.rows.blocks.push(block_row);
-            for transaction in complete_transactions {
-                self.process_transaction(transaction).await?;
+            for tx_hash in transactions_to_commit {
+                let mut transaction = self
+                    .tx_cache
+                    .get_and_remove_transaction(&tx_hash)
+                    .expect("Missing pending transaction to commit");
+                self.process_transaction(&mut transaction);
+                if !transaction.pending_receipt_ids.is_empty() {
+                    self.tx_cache.insert_transaction(transaction, &[]);
+                }
             }
-        }
 
-        self.maybe_commit(db, block_height).await?;
+            self.maybe_commit(block_height).await?;
+        }
 
         Ok(block_hash)
     }
 
-    async fn process_transaction(&mut self, transaction: PendingTransaction) -> anyhow::Result<()> {
+    fn process_transaction(&mut self, transaction: &mut PendingTransaction) {
         let tx_hash = transaction.transaction_hash().to_string();
-        let last_block_info = transaction.blocks.last().cloned().unwrap();
         let signer_id = transaction
             .transaction
             .transaction
             .signer_id
             .clone()
             .to_string();
-
-        for block_info in transaction.blocks {
-            self.rows.block_txs.push(BlockTxRow {
-                block_height: block_info.block_height,
-                block_hash: block_info.block_hash.to_string(),
-                block_timestamp: block_info.block_timestamp,
-                transaction_hash: tx_hash.clone(),
-                signer_id: signer_id.clone(),
-                tx_block_height: transaction.tx_block_height,
+        let receiver_id = transaction
+            .transaction
+            .transaction
+            .receiver_id
+            .clone()
+            .to_string();
+        let delegate_accounts =
+            transaction
+                .transaction
+                .transaction
+                .actions
+                .iter()
+                .find_map(|action| match action {
+                    ActionView::Delegate {
+                        delegate_action, ..
+                    } => Some((
+                        delegate_action.sender_id.to_string(),
+                        delegate_action.receiver_id.to_string(),
+                    )),
+                    _ => None,
+                });
+        let (delegate_signer_id, delegate_receiver_id) = delegate_accounts
+            .map_or((None, None), |(signer_id, receiver_id)| {
+                (Some(signer_id), Some(receiver_id))
             });
-        }
 
-        let mut accounts = HashSet::new();
-        accounts.insert(transaction.transaction.transaction.signer_id.clone());
-        for receipt in &transaction.transaction.receipts {
-            let receipt_id = receipt.receipt.receipt_id.to_string();
-            self.rows.receipt_txs.push(ReceiptTxRow {
-                receipt_id,
-                transaction_hash: tx_hash.clone(),
-                signer_id: signer_id.clone(),
-                tx_block_height: transaction.tx_block_height,
-                tx_block_timestamp: transaction.tx_block_timestamp,
-            });
-            add_accounts_from_receipt(&mut accounts, &receipt.receipt);
-            add_accounts_from_logs(&mut accounts, &receipt.execution_outcome.outcome.logs);
-        }
-        for data_receipt in &transaction.transaction.data_receipts {
-            let receipt_id = data_receipt.receipt_id.to_string();
-            self.rows.receipt_txs.push(ReceiptTxRow {
-                receipt_id,
-                transaction_hash: tx_hash.clone(),
-                signer_id: signer_id.clone(),
-                tx_block_height: transaction.tx_block_height,
-                tx_block_timestamp: transaction.tx_block_timestamp,
-            });
-        }
+        let is_completed = transaction.pending_receipt_ids.is_empty();
+        let mut tail_receipt_id = None;
+        let is_success = loop {
+            let status = if let Some(receipt_id) = tail_receipt_id.take() {
+                let rs = transaction.transaction.receipts.iter().find_map(|receipt| {
+                    if receipt.receipt.receipt_id == receipt_id {
+                        Some(&receipt.execution_outcome.outcome.status)
+                    } else {
+                        None
+                    }
+                });
+                if rs.is_none() {
+                    break false;
+                }
+                rs.unwrap()
+            } else {
+                &transaction.transaction.execution_outcome.outcome.status
+            };
+            match status {
+                ExecutionStatusView::SuccessValue(_) => {
+                    break true;
+                }
+                ExecutionStatusView::SuccessReceiptId(rh) => {
+                    tail_receipt_id = Some(*rh);
+                }
+                _ => {
+                    break false;
+                }
+            }
+        };
 
-        for account_id in accounts {
-            self.rows.account_txs.push(AccountTxRow {
-                account_id: account_id.to_string(),
-                transaction_hash: tx_hash.clone(),
-                signer_id: signer_id.clone(),
-                tx_block_height: transaction.tx_block_height,
-                tx_block_timestamp: transaction.tx_block_timestamp,
-            });
-        }
-
-        self.rows.transactions.push(TransactionRow {
-            transaction_hash: tx_hash.clone(),
+        let mut accounts = transaction.committed_account_tx_rows.clone();
+        let mut tx_row = TransactionRow {
+            transaction_hash: transaction.transaction_hash().to_string(),
             signer_id: signer_id.clone(),
             tx_block_height: transaction.tx_block_height,
+            tx_index: transaction.tx_index,
             tx_block_hash: transaction.tx_block_hash.to_string(),
             tx_block_timestamp: transaction.tx_block_timestamp,
-            transaction: serde_json::to_string(&transaction.transaction).unwrap(),
-            last_block_height: last_block_info.block_height,
+            last_block_height: transaction.last_block_height,
+            is_completed,
+            shard_id: transaction.shard_id,
+            receiver_id: receiver_id.clone(),
+            signer_public_key: transaction.transaction.transaction.public_key.to_string(),
+            priority_fee: transaction.transaction.transaction.priority_fee,
+            nonce: transaction.transaction.transaction.nonce,
+            is_relayed: delegate_signer_id.is_some(),
+            real_signer_id: delegate_signer_id
+                .as_ref()
+                .unwrap_or(&signer_id)
+                .to_string(),
+            real_receiver_id: delegate_receiver_id
+                .as_ref()
+                .unwrap_or(&receiver_id)
+                .to_string(),
+            is_success,
+            gas_burnt: 0,
+            tokens_burnt: 0,
+        };
+        if let Some(delegate_signer_id) = delegate_signer_id {
+            accounts
+                .row(&delegate_signer_id)
+                .set_delegated_signer()
+                .set_any_signer();
+        }
+        accounts.row(&signer_id).set_signer().set_any_signer();
+        accounts.row(&tx_row.real_receiver_id).set_real_receiver();
+        accounts.row(&tx_row.real_signer_id).set_real_signer();
+
+        for receipt in &transaction.transaction.receipts {
+            add_accounts_from_receipt(&mut accounts, &receipt.receipt);
+            add_accounts_from_logs(&mut accounts, &receipt.execution_outcome.outcome.logs);
+            tx_row.gas_burnt += receipt.execution_outcome.outcome.gas_burnt.as_gas();
+            tx_row.tokens_burnt += receipt
+                .execution_outcome
+                .outcome
+                .tokens_burnt
+                .as_yoctonear();
+        }
+
+        if transaction.committed_tx_row.as_ref() != Some(&tx_row) {
+            self.rows.tx_rows.push(tx_row.clone());
+            transaction.committed_tx_row = Some(tx_row);
+        }
+
+        if is_success {
+            for row in accounts.accounts.values_mut() {
+                row.is_success = true;
+            }
+        }
+        for (account_id, row) in accounts.accounts.iter_mut() {
+            row.account_id = account_id.clone();
+            row.last_block_height = transaction.last_block_height;
+            row.tx_block_height = transaction.tx_block_height;
+            row.tx_block_timestamp = transaction.tx_block_timestamp;
+            row.transaction_hash = tx_hash.clone();
+            row.tx_index = transaction.tx_index;
+        }
+
+        for row in accounts.accounts.values() {
+            if transaction
+                .committed_account_tx_rows
+                .accounts
+                .get(&row.account_id)
+                != Some(row)
+            {
+                self.rows.account_txs.push(row.clone());
+            }
+        }
+        mem::swap(&mut accounts, &mut transaction.committed_account_tx_rows);
+
+        let encoded_tx = serde_json::to_vec(&transaction.transaction).unwrap();
+
+        self.rows.raw_tx_rows.push(RawTransactionRow {
+            transaction_hash: transaction.transaction_hash().to_string(),
+            tx_block_timestamp: transaction.tx_block_timestamp,
+            last_block_height: transaction.last_block_height,
+            data: zstd::encode_all(&encoded_tx[..], 3).expect("zstd encode error"),
         });
-
-        // TODO: Save TX to redis
-
-        Ok(())
     }
 
-    pub async fn maybe_commit(
-        &mut self,
-        db: &ClickDB,
-        block_height: BlockHeight,
-    ) -> anyhow::Result<()> {
+    pub async fn maybe_commit(&mut self, block_height: BlockHeight) -> anyhow::Result<()> {
         let is_round_block = block_height % SAVE_STEP == 0;
         if is_round_block {
             tracing::log::info!(
                 target: CLICKHOUSE_TARGET,
-                "#{}: Having {} transactions, {} account_txs, {} block_txs, {} receipts_txs, {} blocks",
+                "#{}: Having {} tx_rows, {} account_txs, {} receipts_txs, {} blocks, {} transactions, {} actions, {} events",
                 block_height,
-                self.rows.transactions.len(),
+                self.rows.tx_rows.len(),
                 self.rows.account_txs.len(),
-                self.rows.block_txs.len(),
                 self.rows.receipt_txs.len(),
                 self.rows.blocks.len(),
+                self.rows.raw_tx_rows.len(),
+                self.rows.actions.len(),
+                self.rows.events.len(),
             );
         }
-        if self.rows.transactions.len() >= db.min_batch || is_round_block || self.commit_every_block
+        if self.rows.tx_rows.len() >= self.db.min_batch || is_round_block || self.commit_every_block
         {
-            self.commit(db).await?;
+            self.commit().await?;
         }
 
         Ok(())
     }
 
-    pub async fn commit(&mut self, db: &ClickDB) -> anyhow::Result<()> {
+    pub async fn commit(&mut self) -> anyhow::Result<()> {
         let mut rows = TxRows::default();
         std::mem::swap(&mut rows, &mut self.rows);
-        while self.commit_handlers.len() >= MAX_COMMIT_HANDLERS {
-            self.commit_handlers.remove(0).await??;
+        tracing::log::info!(
+            target: CLICKHOUSE_TARGET,
+            "Preparing to commit. {} handlers in progress",
+            self.commit_handlers.len()
+        );
+        while let Some(first) = self.commit_handlers.first() {
+            if first.is_finished() {
+                self.commit_handlers.remove(0).await??;
+            } else {
+                break;
+            }
         }
-        let db = db.clone();
+        let permit = self.commit_semaphore.clone().acquire_owned().await?;
+        let db = self.db.clone();
         let handler = tokio::spawn(async move {
-            if !rows.transactions.is_empty() {
-                insert_rows_with_retry(&db.client, &rows.transactions, "transactions").await?;
-            }
-            if !rows.account_txs.is_empty() {
-                insert_rows_with_retry(&db.client, &rows.account_txs, "account_txs").await?;
-            }
-            if !rows.block_txs.is_empty() {
-                insert_rows_with_retry(&db.client, &rows.block_txs, "block_txs").await?;
-            }
-            if !rows.receipt_txs.is_empty() {
-                insert_rows_with_retry(&db.client, &rows.receipt_txs, "receipt_txs").await?;
-            }
-            if !rows.blocks.is_empty() {
-                insert_rows_with_retry(&db.client, &rows.blocks, "blocks").await?;
-            }
+            let _permit = permit;
+
+            let start = std::time::Instant::now();
+            try_join!(
+                insert_rows_with_retry(&db.client, &rows.raw_tx_rows, "raw_tx"),
+                insert_rows_with_retry(&db.client, &rows.tx_rows, "transactions"),
+                insert_rows_with_retry(&db.client, &rows.account_txs, "account_txs"),
+                insert_rows_with_retry(&db.client, &rows.receipt_txs, "receipt_txs"),
+                insert_rows_with_retry(&db.client, &rows.actions, "actions"),
+                insert_rows_with_retry(&db.client, &rows.events, "events"),
+            )?;
+            insert_rows_with_retry(&db.client, &rows.blocks, "blocks").await?;
+            let duration = start.elapsed().as_millis();
             tracing::log::info!(
                 target: CLICKHOUSE_TARGET,
-                "Committed {} transactions, {} account_txs, {} block_txs, {} receipts_txs, {} blocks",
-                rows.transactions.len(),
+                "({} ms) Committed {} raw_tx_rows, {} tx_rows, {} account_txs, {} receipts_txs, {} blocks, {} actions, {} events",
+                duration,
+                rows.raw_tx_rows.len(),
+                rows.tx_rows.len(),
                 rows.account_txs.len(),
-                rows.block_txs.len(),
                 rows.receipt_txs.len(),
                 rows.blocks.len(),
+                rows.actions.len(),
+                rows.events.len(),
             );
-            Ok::<(), clickhouse::error::Error>(())
+            Ok::<(), anyhow::Error>(())
         });
         self.commit_handlers.push(handler);
 
         Ok(())
     }
 
-    pub async fn last_block_height(&mut self, db: &ClickDB) -> BlockHeight {
-        db.max("block_height", "blocks").await.unwrap_or(0)
-    }
-
-    pub fn is_cache_ready(&self, _last_block_height: BlockHeight) -> bool {
-        false
+    pub async fn last_block_in_range(
+        &self,
+        db: &ClickDB,
+        start_block: BlockHeight,
+        end_block: BlockHeight,
+    ) -> BlockHeight {
+        let res = db
+            .max_in_range("block_height", "blocks", start_block, end_block)
+            .await
+            .unwrap_or(0);
+        if res == 0 {
+            start_block.saturating_sub(1)
+        } else {
+            res
+        }
     }
 
     pub async fn flush(&mut self) -> anyhow::Result<()> {
@@ -521,41 +660,66 @@ impl TransactionsData {
     }
 }
 
-fn extract_accounts(accounts: &mut HashSet<AccountId>, value: &Value, keys: &[&str]) {
+fn extract_accounts(
+    accounts: &mut Accounts,
+    value: &Value,
+    keys: &[&str],
+    is_function_call_args: bool,
+) {
     for arg in keys {
         if let Some(account_id) = value.get(arg) {
             if let Some(account_id) = account_id.as_str() {
                 if let Ok(account_id) = AccountId::from_str(account_id) {
-                    accounts.insert(account_id);
+                    if is_function_call_args {
+                        accounts.row(account_id.as_str()).set_action_arg();
+                    } else {
+                        accounts.row(account_id.as_str()).set_event_log();
+                    }
                 }
             }
         }
     }
 }
 
-fn add_accounts_from_logs(accounts: &mut HashSet<AccountId>, logs: &[String]) {
+fn add_accounts_from_logs(accounts: &mut Accounts, logs: &[String]) {
     for log in logs {
         if log.starts_with(EVENT_JSON_PREFIX) {
             let event_json = &log[EVENT_JSON_PREFIX.len()..];
             if let Ok(event) = serde_json::from_str::<EventJson>(event_json) {
                 for data in &event.data {
-                    extract_accounts(accounts, data, &POTENTIAL_EVENTS_ARGS);
+                    extract_accounts(accounts, data, &POTENTIAL_EVENTS_ARGS, false);
                 }
             }
         }
     }
 }
 
-fn add_accounts_from_receipt(accounts: &mut HashSet<AccountId>, receipt: &views::ReceiptView) {
-    accounts.insert(receipt.receiver_id.clone());
+fn add_accounts_from_receipt(accounts: &mut Accounts, receipt: &ImprovedReceiptView) {
+    accounts.row(receipt.receiver_id.as_str()).set_receiver();
+    accounts
+        .row(receipt.predecessor_id.as_str())
+        .set_predecessor();
+    let mut is_delegate_receipt = false;
     match &receipt.receipt {
-        ReceiptEnumView::Action { actions, .. } => {
+        ReceiptEnumView::Action {
+            actions, refund_to, ..
+        } => {
+            if let Some(refund_to) = refund_to {
+                accounts.row(refund_to.as_str()).set_explicit_refund_to();
+            }
             for action in actions {
                 match action {
                     ActionView::FunctionCall { args, .. } => {
+                        accounts
+                            .row(receipt.receiver_id.as_str())
+                            .set_function_call();
                         if let Ok(args) = serde_json::from_slice::<Value>(&args) {
-                            extract_accounts(accounts, &args, &POTENTIAL_ACCOUNT_ARGS);
+                            extract_accounts(accounts, &args, &POTENTIAL_ACCOUNT_ARGS, true);
                         }
+                    }
+                    ActionView::Delegate { .. } => {
+                        // Two delegate actions are not an issue
+                        is_delegate_receipt = actions.len() == 1;
                     }
                     _ => {}
                 }
@@ -564,12 +728,18 @@ fn add_accounts_from_receipt(accounts: &mut HashSet<AccountId>, receipt: &views:
         ReceiptEnumView::Data { .. } => {}
         ReceiptEnumView::GlobalContractDistribution { .. } => {}
     }
+    if !is_delegate_receipt && receipt.predecessor_id.as_str() != SYSTEM_ACCOUNT_ID {
+        accounts
+            .row(receipt.receiver_id.as_str())
+            .set_real_receiver();
+    }
 }
 
 #[derive(Default)]
 pub struct TxCache {
     pub receipt_to_tx: HashMap<CryptoHash, CryptoHash>,
-    pub data_receipts: HashMap<CryptoHash, views::ReceiptView>,
+    pub action_receipts: HashMap<CryptoHash, ImprovedReceiptView>,
+    pub data_receipts: HashMap<CryptoHash, ImprovedReceiptView>,
     pub transactions: HashMap<CryptoHash, PendingTransaction>,
     pub last_block_height: BlockHeight,
 }
@@ -581,9 +751,10 @@ impl TxCache {
 
     pub fn stats(&self) -> String {
         format!(
-            "mem: {} tx, {} r, {} dr",
+            "mem: {} tr, {} r, {} ar, {} dr",
             self.transactions.len(),
             self.receipt_to_tx.len(),
+            self.action_receipts.len(),
             self.data_receipts.len(),
         )
     }
@@ -609,7 +780,25 @@ impl TxCache {
         self.receipt_to_tx.remove(receipt_id);
     }
 
-    fn insert_data_receipt(&mut self, data_id: &CryptoHash, receipt: views::ReceiptView) {
+    fn insert_action_receipt(&mut self, receipt: ImprovedReceiptView) {
+        let receipt_id = receipt.receipt_id;
+        let old_receipt = self.action_receipts.insert(receipt_id, receipt);
+        // In-memory insert.
+        if let Some(old_receipt) = old_receipt {
+            assert_eq!(
+                old_receipt.receipt_id, receipt_id,
+                "Duplicate action receipt_id: {} with different receipt_ids!",
+                receipt_id
+            );
+            tracing::log::warn!(target: PROJECT_ID, "Duplicate action receipt_id: {} ", receipt_id);
+        }
+    }
+
+    fn remove_action_receipt(&mut self, receipt_id: &CryptoHash) -> Option<ImprovedReceiptView> {
+        self.action_receipts.remove(receipt_id)
+    }
+
+    fn insert_data_receipt(&mut self, data_id: &CryptoHash, receipt: ImprovedReceiptView) {
         let receipt_id = receipt.receipt_id;
         let is_promise_resume = match &receipt.receipt {
             ReceiptEnumView::Action { .. } => false,
@@ -653,7 +842,7 @@ impl TxCache {
         }
     }
 
-    fn get_and_remove_data_receipt(&mut self, data_id: &CryptoHash) -> Option<views::ReceiptView> {
+    fn get_and_remove_data_receipt(&mut self, data_id: &CryptoHash) -> Option<ImprovedReceiptView> {
         self.data_receipts.remove(data_id)
     }
 

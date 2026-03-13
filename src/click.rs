@@ -24,10 +24,18 @@ impl ClickDB {
         }
     }
 
-    pub async fn max(&self, column: &str, table: &str) -> clickhouse::error::Result<BlockHeight> {
+    pub async fn max_in_range(
+        &self,
+        column: &str,
+        table: &str,
+        start_block: BlockHeight,
+        end_block: BlockHeight,
+    ) -> clickhouse::error::Result<BlockHeight> {
         let block_height = self
             .client
-            .query(&format!("SELECT max({}) FROM {}", column, table))
+            .query(&format!(
+                "SELECT max({column}) FROM {table} where block_height >= {start_block} and block_height < {end_block}"
+            ))
             .fetch_one::<u64>()
             .await?;
         Ok(block_height)
@@ -55,6 +63,9 @@ pub async fn insert_rows_with_retry<T>(
 where
     T: Row + Serialize,
 {
+    if rows.is_empty() {
+        return Ok(());
+    }
     let mut delay = Duration::from_millis(100);
     let max_retries = 10;
     let mut i = 0;
