@@ -484,7 +484,7 @@ impl TransactionsData {
             shard_id: transaction.shard_id,
             receiver_id: receiver_id.clone(),
             signer_public_key: transaction.transaction.transaction.public_key.to_string(),
-            priority_fee: transaction.transaction.transaction.priority_fee,
+            priority_fee: 0,
             nonce: transaction.transaction.transaction.nonce,
             is_relayed: delegate_signer_id.is_some(),
             real_signer_id: delegate_signer_id

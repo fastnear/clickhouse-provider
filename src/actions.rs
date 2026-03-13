@@ -324,6 +324,12 @@ pub fn extract_rows(
                         ActionView::AddKey { public_key, .. } => Some(public_key.to_string()),
                         ActionView::DeleteKey { public_key, .. } => Some(public_key.to_string()),
                         ActionView::Stake { public_key, .. } => Some(public_key.to_string()),
+                        ActionView::TransferToGasKey { public_key, .. } => {
+                            Some(public_key.to_string())
+                        }
+                        ActionView::WithdrawFromGasKey { public_key, .. } => {
+                            Some(public_key.to_string())
+                        }
                         _ => None,
                     },
                     access_key_contract_id: match &action {
@@ -340,6 +346,8 @@ pub fn extract_rows(
                         ActionView::Stake { stake, .. } => Some(*stake),
                         ActionView::FunctionCall { deposit, .. } => Some(*deposit),
                         ActionView::DeterministicStateInit { deposit, .. } => Some(*deposit),
+                        ActionView::TransferToGasKey { deposit, .. } => Some(*deposit),
+                        ActionView::WithdrawFromGasKey { amount, .. } => Some(*amount),
                         _ => None,
                     }
                     .map(|d| d.as_yoctonear()),
@@ -475,6 +483,8 @@ fn action_type(action: &ActionView) -> String {
         ActionView::UseGlobalContract { .. } => "UseGlobalContract",
         ActionView::UseGlobalContractByAccountId { .. } => "UseGlobalContractByAccountId",
         ActionView::DeterministicStateInit { .. } => "DeterministicStateInit",
+        ActionView::TransferToGasKey { .. } => "TransferToGasKey",
+        ActionView::WithdrawFromGasKey { .. } => "WithdrawFromGasKey",
     }
     .to_string()
 }
