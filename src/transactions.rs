@@ -15,6 +15,7 @@ use tokio::sync::Semaphore;
 
 const EVENT_JSON_PREFIX: &str = "EVENT_JSON:";
 const SYSTEM_ACCOUNT_ID: &str = "system";
+const TESTNET_INSTANT_RECEIPT_FIX_BLOCK_HEIGHT: BlockHeight = 243470300;
 
 const POTENTIAL_ACCOUNT_ARGS: [&str; 19] = [
     "receiver_id",
@@ -70,6 +71,7 @@ impl PendingTransaction {
 }
 
 pub struct TransactionsData {
+    pub chain_id: ChainId,
     pub commit_every_block: bool,
     pub is_backfill: bool,
     pub tx_cache: TxCache,
@@ -80,7 +82,7 @@ pub struct TransactionsData {
 }
 
 impl TransactionsData {
-    pub fn new(is_backfill: bool, db: Arc<ClickDB>) -> Self {
+    pub fn new(chain_id: ChainId, is_backfill: bool, db: Arc<ClickDB>) -> Self {
         let commit_every_block = env::var("COMMIT_EVERY_BLOCK")
             .map(|v| v == "true")
             .unwrap_or(false);
@@ -93,6 +95,7 @@ impl TransactionsData {
         let commit_semaphore = Arc::new(Semaphore::new(max_commit_handlers));
 
         Self {
+            chain_id,
             commit_every_block,
             is_backfill,
             tx_cache,
@@ -196,7 +199,13 @@ impl TransactionsData {
                     self.tx_cache
                         .insert_transaction(pending_transaction, &pending_receipt_ids);
                 }
-                for receipt in chunk.local_receipts.into_iter().chain(chunk.receipts) {
+                for receipt in chunk
+                    .local_receipts
+                    .into_iter()
+                    .chain(chunk.receipts)
+                    .into_iter()
+                    .chain(chunk.instant_receipts)
+                {
                     let receipt = ImprovedReceiptView::from_receipt(
                         receipt,
                         appear_receipt_index,
@@ -248,7 +257,26 @@ impl TransactionsData {
                 let action_receipt = self
                     .tx_cache
                     .remove_action_receipt(&receipt_id)
-                    .expect("Missing action receipt for an receipt execution outcome");
+                    .unwrap_or_else(|| {
+                        if self.chain_id == ChainId::Mainnet || self.chain_id == ChainId::Testnet && block_height >= TESTNET_INSTANT_RECEIPT_FIX_BLOCK_HEIGHT {
+                            panic!(
+                                "Missing action receipt for receipt_id {} tx_hash {} at block {}",
+                                receipt_id, tx_hash, block_height
+                            );
+                        }
+                        tracing::log::warn!(target: PROJECT_ID,
+                            "Missing action receipt for receipt_id {} at block {}. Assuming instant receipt for testnet.",
+                            receipt_id, block_height
+                        );
+
+                        let action_receipt = ImprovedReceiptView::from_receipt(
+                            receipt.clone(),
+                            appear_receipt_index,
+                            &block_info,
+                        );
+                        appear_receipt_index += 1;
+                        action_receipt
+                    });
                 let pending_transaction = self.tx_cache.get_and_remove_transaction(&tx_hash);
                 if pending_transaction.is_none() {
                     panic!(
