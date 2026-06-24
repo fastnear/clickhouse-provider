@@ -7,6 +7,7 @@ use fastnear_primitives::near_primitives::types::{AccountId, BlockHeight};
 use fastnear_primitives::near_primitives::views::{ActionView, ReceiptEnumView};
 
 use crate::actions::extract_rows;
+use fastnear_primitives::near_primitives::action::delegate::VersionedDelegateActionPayload;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
@@ -461,6 +462,14 @@ impl TransactionsData {
                         delegate_action.sender_id.to_string(),
                         delegate_action.receiver_id.to_string(),
                     )),
+                    ActionView::DelegateV2 {
+                        delegate_action, ..
+                    } => Some(match delegate_action {
+                        VersionedDelegateActionPayload::V2(delegate_payload) => (
+                            delegate_payload.sender_id.to_string(),
+                            delegate_payload.receiver_id.to_string(),
+                        ),
+                    }),
                     _ => None,
                 });
         let (delegate_signer_id, delegate_receiver_id) = delegate_accounts
@@ -745,7 +754,7 @@ fn add_accounts_from_receipt(accounts: &mut Accounts, receipt: &ImprovedReceiptV
                             extract_accounts(accounts, &args, &POTENTIAL_ACCOUNT_ARGS, true);
                         }
                     }
-                    ActionView::Delegate { .. } => {
+                    ActionView::Delegate { .. } | ActionView::DelegateV2 { .. } => {
                         // Two delegate actions are not an issue
                         is_delegate_receipt = actions.len() == 1;
                     }

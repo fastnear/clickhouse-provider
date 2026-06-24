@@ -1,5 +1,6 @@
 use fastnear_primitives::near_indexer_primitives::types::AccountId;
 use fastnear_primitives::near_indexer_primitives::views::GlobalContractIdentifierView;
+use fastnear_primitives::near_primitives::action::delegate::VersionedDelegateActionPayload;
 use fastnear_primitives::near_primitives::hash::CryptoHash;
 
 use crate::types::{ActionRow, BlockInfo, EventRow, ImprovedReceiptView, PendingTransaction};
@@ -372,6 +373,13 @@ pub fn extract_rows(
                         ActionView::Delegate {
                             delegate_action, ..
                         } => Some(delegate_action.receiver_id.to_string()),
+                        ActionView::DelegateV2 {
+                            delegate_action, ..
+                        } => Some(match delegate_action {
+                            VersionedDelegateActionPayload::V2(delegate_payload) => {
+                                delegate_payload.receiver_id.to_string()
+                            }
+                        }),
                         _ => None,
                     },
                     global_account_id: match &action {
@@ -485,6 +493,7 @@ fn action_type(action: &ActionView) -> String {
         ActionView::DeterministicStateInit { .. } => "DeterministicStateInit",
         ActionView::TransferToGasKey { .. } => "TransferToGasKey",
         ActionView::WithdrawFromGasKey { .. } => "WithdrawFromGasKey",
+        ActionView::DelegateV2 { .. } => "DelegateV2",
     }
     .to_string()
 }
