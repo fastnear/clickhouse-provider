@@ -1,3 +1,38 @@
+### Configuration
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `DATABASE_URL` / `DATABASE_USER` / `DATABASE_PASSWORD` / `DATABASE_DATABASE` | required | ClickHouse connection |
+| `CHAIN_ID` | required | `mainnet` or `testnet` |
+| `NUM_FETCHING_THREADS` | required | Fetch threads used while behind the tip |
+| `NUM_LOOKAHEAD_THREADS` | `4` | Fetch threads used while at the tip |
+| `AUTH_BEARER_TOKEN` | none | neardata auth token |
+| `MAX_BLOCKS_PER_COMMIT` | `100` | Largest number of blocks one commit covers |
+| `MAX_COMMIT_HANDLERS` | `3` | Commits allowed in flight at once |
+| `CLICKHOUSE_DISTRIBUTED_SYNC` | `true` | Wait for the shards, not just the `Distributed` coordinator, before an INSERT is acknowledged |
+| `CLICKHOUSE_INSERT_SEND_TIMEOUT_SECS` | `30` | Per-chunk send timeout for an INSERT |
+| `CLICKHOUSE_INSERT_END_TIMEOUT_SECS` | `120` | Timeout for the server to acknowledge an INSERT |
+| `CLICKHOUSE_SKIP_COMMIT` | `false` | Dry run: process blocks but write nothing |
+
+Optional CLI args select a backfill range: `clickhouse-provider <start_height> <end_height>`.
+
+#### How committing works
+
+Commits are bundled adaptively rather than on a fixed cadence. The block loop drains
+whatever the fetcher has already buffered (up to `MAX_BLOCKS_PER_COMMIT`) and commits that
+as one batch. At the tip the channel is empty, so a bundle is a single block and latency
+is unchanged; when the indexer falls behind the channel is full, so a bundle is large and
+one commit's fixed cost is amortised across all of it. This matters because the cost of an
+INSERT into these tables is per-INSERT, not per-row -- a batch of one `blocks` row is about
+as expensive as a batch of thousands.
+
+`blocks` is the restart watermark (`SELECT max(block_height) FROM blocks`), and blocks at
+or below it are replayed without writing anything, so it must never advance past durable
+data. Within a commit the six data tables go in parallel and `blocks` goes last; across
+commits, a commit waits for its predecessor to finish before writing `blocks`. A failed
+commit never signals completion, which poisons every commit after it, so the watermark
+stops rather than skipping a range.
+
 ### Clickhouse explorer tables
 
 The explorer is transaction focused. Everything is bundled around transactions.
