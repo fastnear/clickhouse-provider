@@ -13,9 +13,22 @@ pub const MAX_COMMIT_HANDLERS: usize = 3;
 const DEFAULT_INSERT_SEND_TIMEOUT_SECS: u64 = 30;
 /// Timeout for the server to acknowledge the whole INSERT. This covers all the work the
 /// server does for it: materialized views, replication, and -- with
-/// `insert_distributed_sync` -- the fan-out to the shards. Sized generously because
-/// bundling makes batches much larger than they used to be.
-const DEFAULT_INSERT_END_TIMEOUT_SECS: u64 = 120;
+/// `insert_distributed_sync` -- the fan-out to the shards.
+///
+/// This is a hang detector, not a latency target. A commit normally lands in a couple of
+/// seconds, but the legitimate tail is much longer -- a large bundle during a backfill,
+/// a merge storm, `too many parts` insert throttling, a shard restarting -- and a
+/// timeout that fires on a merely-slow cluster re-sends the whole batch and makes the
+/// slowness worse. So: comfortably above the real tail, far below "forever".
+const DEFAULT_INSERT_END_TIMEOUT_SECS: u64 = 30;
+
+/// Wall-clock budget for one table's insert across *all* its retry attempts.
+///
+/// Bounds the thing that actually hurts: ten attempts that each burn the full end
+/// timeout, plus ~100s of backoff, would otherwise let a single commit hold its semaphore
+/// permit and stall the watermark for over twenty minutes. Giving up is safe -- the
+/// watermark never advanced, so a supervised restart resumes exactly where it left off.
+const DEFAULT_INSERT_RETRY_BUDGET_SECS: u64 = 300;
 
 #[derive(Row, Deserialize, Debug)]
 pub struct BlockChainRow {
@@ -29,6 +42,7 @@ pub struct ClickDB {
     pub skip_commit: bool,
     pub send_timeout: Duration,
     pub end_timeout: Duration,
+    pub retry_budget: Duration,
 }
 
 impl ClickDB {
@@ -47,6 +61,10 @@ impl ClickDB {
             end_timeout: Duration::from_secs(env_u64(
                 "CLICKHOUSE_INSERT_END_TIMEOUT_SECS",
                 DEFAULT_INSERT_END_TIMEOUT_SECS,
+            )),
+            retry_budget: Duration::from_secs(env_u64(
+                "CLICKHOUSE_INSERT_RETRY_BUDGET_SECS",
+                DEFAULT_INSERT_RETRY_BUDGET_SECS,
             )),
         }
     }
@@ -136,6 +154,7 @@ where
     if rows.is_empty() || db.skip_commit {
         return Ok(());
     }
+    let started = std::time::Instant::now();
     let mut delay = Duration::from_millis(100);
     let max_retries = 10;
     let mut i = 0;
@@ -156,8 +175,10 @@ where
         match res.await {
             Ok(v) => break Ok(v),
             Err(err) => {
-                if i == max_retries - 1 {
-                    tracing::log::error!(target: CLICKHOUSE_TARGET, "Giving up after {} attempts inserting {} rows into \"{}\": {}", max_retries, rows.len(), table, err);
+                let elapsed = started.elapsed();
+                // Stop on whichever runs out first: attempts, or the wall-clock budget.
+                if i == max_retries - 1 || elapsed + delay >= db.retry_budget {
+                    tracing::log::error!(target: CLICKHOUSE_TARGET, "Giving up after {} attempts over {:.1} sec inserting {} rows into \"{}\": {}", i + 1, elapsed.as_secs_f64(), rows.len(), table, err);
                     break Err(err);
                 }
                 // Not an error yet -- this attempt will be retried. A stale pooled

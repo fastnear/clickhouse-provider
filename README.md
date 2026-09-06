@@ -11,7 +11,8 @@
 | `MAX_COMMIT_HANDLERS` | `3` | Commits allowed in flight at once |
 | `CLICKHOUSE_DISTRIBUTED_SYNC` | `true` | Wait for the shards, not just the `Distributed` coordinator, before an INSERT is acknowledged |
 | `CLICKHOUSE_INSERT_SEND_TIMEOUT_SECS` | `30` | Per-chunk send timeout for an INSERT |
-| `CLICKHOUSE_INSERT_END_TIMEOUT_SECS` | `120` | Timeout for the server to acknowledge an INSERT |
+| `CLICKHOUSE_INSERT_END_TIMEOUT_SECS` | `30` | Timeout for the server to acknowledge one INSERT attempt |
+| `CLICKHOUSE_INSERT_RETRY_BUDGET_SECS` | `300` | Wall-clock budget for one table's insert across all retries |
 | `CLICKHOUSE_SKIP_COMMIT` | `false` | Dry run: process blocks but write nothing |
 
 Optional CLI args select a backfill range: `clickhouse-provider <start_height> <end_height>`.
