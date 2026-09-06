@@ -839,22 +839,50 @@ impl TransactionsData {
         Ok(())
     }
 
+    /// The height to resume from: the highest block whose bundle is known to be fully
+    /// stored.
+    ///
+    /// `max(block_height)` on its own is not safe. `blocks` is a `Distributed` table
+    /// sharded by `cityHash64(block_height)`, so one commit's rows fan out across shards
+    /// and the insert is not atomic: a commit that exhausts its retries can leave rows on
+    /// some shards and not others. `max()` would then report a height above genuinely
+    /// missing lower blocks, and because everything at or below the resume point is
+    /// replayed without writing anything, the hole would be permanent.
+    ///
+    /// So walk the `prev_block_height` chain down from `max()` and stop at the first
+    /// break. Only the newest bundle can be partial -- commits are ordered and a failed
+    /// one poisons all its successors, so nothing below the previous commit's range can
+    /// be affected -- and the window checked here is several bundles deep.
     pub async fn last_block_in_range(
         &self,
         db: &ClickDB,
         start_block: BlockHeight,
         end_block: BlockHeight,
+        max_blocks_per_commit: usize,
     ) -> anyhow::Result<BlockHeight> {
         // A query error must not be swallowed into 0 here: that would make the indexer
         // treat the whole range as un-indexed and re-index it from scratch in live mode.
-        let res = db
+        let max_block = db
             .max_in_range("block_height", "blocks", start_block, end_block)
             .await?;
-        Ok(if res == 0 {
-            start_block.saturating_sub(1)
-        } else {
-            res
-        })
+        if max_block == 0 {
+            return Ok(start_block.saturating_sub(1));
+        }
+
+        let window = (4 * max_blocks_per_commit as u64).max(SAFE_CATCH_UP_OFFSET);
+        let window_start = max_block.saturating_sub(window).max(start_block);
+        let chain = db.fetch_block_chain(window_start, max_block).await?;
+
+        let last_contiguous = last_contiguous_block(&chain, max_block);
+        if last_contiguous != max_block {
+            tracing::log::warn!(
+                target: PROJECT_ID,
+                "Blocks table has a hole above #{}: max is #{}, but the chain breaks first. \
+                 Resuming from #{} and re-indexing the rest.",
+                last_contiguous, max_block, last_contiguous
+            );
+        }
+        Ok(last_contiguous)
     }
 
     /// Awaits every in-flight commit in order, so the first (lowest sequence) real
@@ -877,6 +905,71 @@ impl TransactionsData {
             Some(err) => Err(err),
             None => Ok(()),
         }
+    }
+}
+
+/// The highest height reachable from the bottom of `chain` without a break in the
+/// `prev_block_height` links, or `max_block` if there is none.
+///
+/// `chain` must be ascending by `block_height`. Heights are not consecutive -- the chain
+/// legitimately skips heights with no block -- so only `prev_block_height` distinguishes
+/// a missing row from a skipped height.
+fn last_contiguous_block(chain: &[BlockChainRow], max_block: BlockHeight) -> BlockHeight {
+    for pair in chain.windows(2) {
+        // A `None` predecessor can't be checked; treat it as unbroken.
+        if let Some(prev_block_height) = pair[1].prev_block_height {
+            if prev_block_height != pair[0].block_height {
+                return pair[0].block_height;
+            }
+        }
+    }
+    max_block
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn chain(pairs: &[(u64, Option<u64>)]) -> Vec<BlockChainRow> {
+        pairs
+            .iter()
+            .map(|(block_height, prev_block_height)| BlockChainRow {
+                block_height: *block_height,
+                prev_block_height: *prev_block_height,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn unbroken_chain_resumes_at_max() {
+        // Heights 11 and 13 were skipped on chain, which is not a hole.
+        let chain = chain(&[(10, Some(9)), (12, Some(10)), (14, Some(12))]);
+        assert_eq!(last_contiguous_block(&chain, 14), 14);
+    }
+
+    #[test]
+    fn stops_before_a_missing_block() {
+        // #12 is missing: #14 says its predecessor was #12, but #12 isn't stored.
+        let chain = chain(&[(10, Some(9)), (11, Some(10)), (14, Some(12))]);
+        assert_eq!(last_contiguous_block(&chain, 14), 11);
+    }
+
+    #[test]
+    fn stops_at_the_first_break_not_the_last() {
+        let chain = chain(&[(10, Some(9)), (14, Some(12)), (20, Some(18))]);
+        assert_eq!(last_contiguous_block(&chain, 20), 10);
+    }
+
+    #[test]
+    fn unverifiable_link_is_treated_as_unbroken() {
+        let chain = chain(&[(10, Some(9)), (11, None), (12, Some(11))]);
+        assert_eq!(last_contiguous_block(&chain, 12), 12);
+    }
+
+    #[test]
+    fn too_short_to_verify_falls_back_to_max() {
+        assert_eq!(last_contiguous_block(&[], 42), 42);
+        assert_eq!(last_contiguous_block(&chain(&[(42, Some(41))]), 42), 42);
     }
 }
 

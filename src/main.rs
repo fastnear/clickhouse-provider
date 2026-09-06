@@ -37,7 +37,7 @@ async fn main() {
 
     let is_running = Arc::new(AtomicBool::new(true));
     let ctrl_c_running = is_running.clone();
-    let signal_handle = tokio::spawn(async move {
+    let mut signal_handle = tokio::spawn(async move {
         let mut sigterm =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
         tokio::select! {
@@ -99,6 +99,7 @@ async fn main() {
             &db,
             backfill_block_height.unwrap_or(0),
             end_backfill_block_height.unwrap_or(10u64.pow(15)),
+            max_blocks_per_commit,
         )
         .await
         .expect("Failed to query the last indexed block height");
@@ -122,13 +123,13 @@ async fn main() {
     if let Some(auth_bearer_token) = auth_bearer_token {
         builder = builder.auth_bearer_token(auth_bearer_token);
     }
-    let fetcher_handle = tokio::spawn(fetcher::start_fetcher(
+    let mut fetcher_handle = tokio::spawn(fetcher::start_fetcher(
         builder.build(),
         sender,
         is_running.clone(),
     ));
     let listener_is_running = is_running.clone();
-    let block_listener_handle = tokio::spawn(async move {
+    let mut block_listener_handle = tokio::spawn(async move {
         listen_blocks_for_transactions(
             receiver,
             transactions_data,
@@ -139,24 +140,52 @@ async fn main() {
         .await
     });
 
-    let listener_result = block_listener_handle.await;
-    // The listener is the only task whose completion means "we're done". `signal_handle`
-    // never completes without a signal, so joining it would hang a finished backfill, and
-    // the fetcher may still be parked on a send into a channel nobody reads any more.
+    // Only the listener finishing means "we're done": it is the task that drains the
+    // channel and writes the final batch. The other two finish normally in expected
+    // situations -- the fetcher when a finite backfill ends or `is_running` goes false,
+    // the signal watcher when a signal arrives -- so a clean exit from either is not a
+    // reason to stop. Their *failure* is, and must not be mistaken for a graceful
+    // shutdown just because the listener then saw the channel close.
+    let mut fetcher_done = false;
+    let mut signal_done = false;
+    let mut aux_error: Option<String> = None;
+    let listener_result = loop {
+        tokio::select! {
+            biased;
+            result = &mut block_listener_handle => break result,
+            result = &mut fetcher_handle, if !fetcher_done => {
+                fetcher_done = true;
+                if let Err(err) = result {
+                    aux_error.get_or_insert(format!("fetcher task terminated: {}", err));
+                    // Wind the listener down: some fetch workers may still hold senders,
+                    // so the channel would otherwise never close.
+                    is_running.store(false, Ordering::SeqCst);
+                }
+            }
+            result = &mut signal_handle, if !signal_done => {
+                signal_done = true;
+                if let Err(err) = result {
+                    aux_error.get_or_insert(format!("signal task terminated: {}", err));
+                    is_running.store(false, Ordering::SeqCst);
+                }
+            }
+        }
+    };
     is_running.store(false, Ordering::SeqCst);
     signal_handle.abort();
     fetcher_handle.abort();
 
-    match listener_result {
-        Ok(Ok(())) => {
+    let error = match listener_result {
+        Ok(Ok(())) => aux_error,
+        Ok(Err(err)) => Some(format!("{:#}", err)),
+        Err(err) => Some(format!("block listener terminated: {}", err)),
+    };
+    match error {
+        None => {
             tracing::log::info!(target: PROJECT_ID, "Gracefully shut down");
         }
-        Ok(Err(err)) => {
-            tracing::log::error!(target: PROJECT_ID, "Indexer failed: {:#}", err);
-            std::process::exit(1);
-        }
-        Err(err) => {
-            tracing::log::error!(target: PROJECT_ID, "Block listener terminated: {}", err);
+        Some(err) => {
+            tracing::log::error!(target: PROJECT_ID, "Indexer failed: {}", err);
             std::process::exit(1);
         }
     }

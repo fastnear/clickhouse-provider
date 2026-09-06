@@ -26,12 +26,20 @@ one commit's fixed cost is amortised across all of it. This matters because the 
 INSERT into these tables is per-INSERT, not per-row -- a batch of one `blocks` row is about
 as expensive as a batch of thousands.
 
-`blocks` is the restart watermark (`SELECT max(block_height) FROM blocks`), and blocks at
-or below it are replayed without writing anything, so it must never advance past durable
-data. Within a commit the six data tables go in parallel and `blocks` goes last; across
-commits, a commit waits for its predecessor to finish before writing `blocks`. A failed
-commit never signals completion, which poisons every commit after it, so the watermark
-stops rather than skipping a range.
+`blocks` is the restart watermark, and blocks at or below it are replayed without writing
+anything, so it must never advance past durable data. Within a commit the six data tables
+go in parallel and `blocks` goes last; across commits, a commit waits for its predecessor
+to finish before writing `blocks`. A failed commit never signals completion, which poisons
+every commit after it, so the watermark stops rather than skipping a range.
+
+That ordering is between commits. A single commit's `blocks` rows are still spread across
+shards by `cityHash64(block_height)`, so its INSERT is not atomic: a commit that exhausts
+its retries can leave rows on some shards and not others. The resume point is therefore
+*not* `max(block_height)` -- it is the highest block reachable by walking the
+`prev_block_height` chain down from the max without a break, so a partially written bundle
+is re-indexed instead of skipped. Block heights are not consecutive (heights with no block
+are skipped on chain), which is why the check follows `prev_block_height` rather than
+comparing heights.
 
 ### Clickhouse explorer tables
 

@@ -1,7 +1,7 @@
 use clickhouse::{Client, Row};
 use std::env;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use fastnear_primitives::near_primitives::types::BlockHeight;
 use std::time::Duration;
@@ -16,6 +16,12 @@ const DEFAULT_INSERT_SEND_TIMEOUT_SECS: u64 = 30;
 /// `insert_distributed_sync` -- the fan-out to the shards. Sized generously because
 /// bundling makes batches much larger than they used to be.
 const DEFAULT_INSERT_END_TIMEOUT_SECS: u64 = 120;
+
+#[derive(Row, Deserialize, Debug)]
+pub struct BlockChainRow {
+    pub block_height: BlockHeight,
+    pub prev_block_height: Option<BlockHeight>,
+}
 
 #[derive(Clone)]
 pub struct ClickDB {
@@ -60,6 +66,26 @@ impl ClickDB {
             .fetch_one::<u64>()
             .await?;
         Ok(block_height)
+    }
+
+    /// The `(block_height, prev_block_height)` chain over a range, ascending.
+    ///
+    /// Block heights are not consecutive -- the chain legitimately skips heights with no
+    /// block -- so `prev_block_height` is the only way to tell a real hole from a skipped
+    /// height.
+    pub async fn fetch_block_chain(
+        &self,
+        start_block: BlockHeight,
+        end_block: BlockHeight,
+    ) -> clickhouse::error::Result<Vec<BlockChainRow>> {
+        self.client
+            .query(&format!(
+                "SELECT block_height, prev_block_height FROM blocks \
+                 WHERE block_height >= {start_block} AND block_height <= {end_block} \
+                 ORDER BY block_height"
+            ))
+            .fetch_all::<BlockChainRow>()
+            .await
     }
 
     pub async fn verify_connection(&self) -> clickhouse::error::Result<()> {
@@ -130,12 +156,16 @@ where
         match res.await {
             Ok(v) => break Ok(v),
             Err(err) => {
-                tracing::log::error!(target: CLICKHOUSE_TARGET, "Attempt #{}: Error inserting {} rows into \"{}\": {}", i, rows.len(), table, err);
-                tokio::time::sleep(delay).await;
-                delay *= 2;
                 if i == max_retries - 1 {
+                    tracing::log::error!(target: CLICKHOUSE_TARGET, "Giving up after {} attempts inserting {} rows into \"{}\": {}", max_retries, rows.len(), table, err);
                     break Err(err);
                 }
+                // Not an error yet -- this attempt will be retried. A stale pooled
+                // keep-alive connection ("client error (SendRequest)") shows up here
+                // routinely and succeeds on the next attempt.
+                tracing::log::warn!(target: CLICKHOUSE_TARGET, "Attempt #{}: Error inserting {} rows into \"{}\": {}", i, rows.len(), table, err);
+                tokio::time::sleep(delay).await;
+                delay *= 2;
             }
         };
         i += 1;
