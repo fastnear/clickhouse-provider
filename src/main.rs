@@ -80,7 +80,8 @@ async fn main() {
             .expect("Failed to parse end backfill block height")
     });
 
-    let transactions_data = TransactionsData::new(end_backfill_block_height.is_some(), db.clone());
+    let transactions_data =
+        TransactionsData::new(chain_id, end_backfill_block_height.is_some(), db.clone());
     let db_last_block_height = transactions_data
         .last_block_in_range(
             &db,

@@ -229,7 +229,7 @@ impl ReceiptTxRow {
             predecessor_id: receipt.predecessor_id.to_string(),
             receiver_id: receipt.receiver_id.to_string(),
             receipt_type,
-            priority: receipt.priority,
+            priority: 0,
             shard_id,
             is_success,
         }
@@ -389,7 +389,7 @@ impl ImprovedReceiptView {
             receiver_id: receipt.receiver_id,
             receipt_id: receipt.receipt_id,
             receipt: receipt.receipt,
-            priority: receipt.priority,
+            priority: 0,
         }
     }
 }
