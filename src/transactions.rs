@@ -9,10 +9,11 @@ use fastnear_primitives::near_primitives::views::{ActionView, ReceiptEnumView};
 use crate::actions::extract_rows;
 use fastnear_primitives::near_primitives::action::delegate::VersionedDelegateActionPayload;
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::str::FromStr;
 use std::{env, mem};
-use tokio::sync::Semaphore;
+use tokio::sync::{oneshot, Semaphore};
 
 const EVENT_JSON_PREFIX: &str = "EVENT_JSON:";
 const SYSTEM_ACCOUNT_ID: &str = "system";
@@ -54,15 +55,85 @@ const POTENTIAL_EVENTS_ARGS: [&str; 11] = [
     "receiver_id",
 ];
 
+/// A raw transaction that hasn't been compressed yet. Compression is deferred to the
+/// commit task so it runs once per surviving transaction, off the block-processing path.
+pub struct PendingRawTx {
+    pub tx_block_timestamp: u64,
+    pub last_block_height: BlockHeight,
+    pub json: Vec<u8>,
+}
+
+/// The rows accumulated since the last commit.
+///
+/// In live mode a transaction re-emits its rows on every block it is touched, so a
+/// bundle of blocks carries many versions of the same row. The three tables that have a
+/// `last_block_height` version column are therefore keyed by their ClickHouse `ORDER BY`
+/// and collapsed to the newest version as they are produced -- exactly what
+/// `ReplacingMergeTree` would collapse them to on merge, just done before the insert
+/// instead of after it.
+///
+/// `receipt_txs`, `blocks`, `actions` and `events` have no version column and emit
+/// exactly one row per block-scoped index, so there is nothing to collapse there.
 #[derive(Default)]
 pub struct TxRows {
-    pub tx_rows: Vec<TransactionRow>,
-    pub account_txs: Vec<AccountTxRow>,
+    /// Keyed by `(tx_block_height, tx_index)`.
+    pub tx_rows: HashMap<(BlockHeight, u32), TransactionRow>,
+    /// Keyed by `(account_id, tx_block_height, tx_index)`.
+    pub account_txs: HashMap<(String, BlockHeight, u32), AccountTxRow>,
+    /// Keyed by `transaction_hash`.
+    pub raw_txs: HashMap<String, PendingRawTx>,
     pub receipt_txs: Vec<ReceiptTxRow>,
     pub blocks: Vec<BlockRow>,
-    pub raw_tx_rows: Vec<RawTransactionRow>,
     pub actions: Vec<ActionRow>,
     pub events: Vec<EventRow>,
+}
+
+impl TxRows {
+    /// `blocks` is the durable watermark, and it is the only table that is written for
+    /// every processed block, so an empty `blocks` means there is nothing to commit.
+    pub fn is_empty(&self) -> bool {
+        self.blocks.is_empty()
+    }
+
+    pub fn push_tx_row(&mut self, row: TransactionRow) {
+        match self.tx_rows.entry((row.tx_block_height, row.tx_index)) {
+            Entry::Occupied(mut e) => {
+                if row.last_block_height >= e.get().last_block_height {
+                    e.insert(row);
+                }
+            }
+            Entry::Vacant(e) => {
+                e.insert(row);
+            }
+        }
+    }
+
+    pub fn push_account_tx(&mut self, row: AccountTxRow) {
+        let key = (row.account_id.clone(), row.tx_block_height, row.tx_index);
+        match self.account_txs.entry(key) {
+            Entry::Occupied(mut e) => {
+                if row.last_block_height >= e.get().last_block_height {
+                    e.insert(row);
+                }
+            }
+            Entry::Vacant(e) => {
+                e.insert(row);
+            }
+        }
+    }
+
+    pub fn push_raw_tx(&mut self, transaction_hash: String, raw: PendingRawTx) {
+        match self.raw_txs.entry(transaction_hash) {
+            Entry::Occupied(mut e) => {
+                if raw.last_block_height >= e.get().last_block_height {
+                    e.insert(raw);
+                }
+            }
+            Entry::Vacant(e) => {
+                e.insert(raw);
+            }
+        }
+    }
 }
 
 impl PendingTransaction {
@@ -71,38 +142,58 @@ impl PendingTransaction {
     }
 }
 
+/// An in-flight commit, tagged with its sequence number so errors can be attributed.
+pub struct CommitHandler {
+    pub seq: u64,
+    pub handle: tokio::task::JoinHandle<Result<(), anyhow::Error>>,
+}
+
 pub struct TransactionsData {
     pub chain_id: ChainId,
-    pub commit_every_block: bool,
     pub is_backfill: bool,
+    /// Whether per-block lines are logged at `info`. Set by the block loop: on when a
+    /// bundle is a single block (we're at the tip), off while bundling to keep the log
+    /// readable at a hundred blocks per second.
+    pub log_each_block: bool,
     pub tx_cache: TxCache,
     pub rows: TxRows,
-    pub commit_handlers: Vec<tokio::task::JoinHandle<Result<(), anyhow::Error>>>,
+    pub commit_handlers: VecDeque<CommitHandler>,
     pub commit_semaphore: Arc<Semaphore>,
+    /// Completion signal of the previously spawned commit. A commit waits on it before
+    /// writing its `blocks` rows, which is what keeps the watermark strictly ordered.
+    pub prev_commit_done: Option<oneshot::Receiver<()>>,
+    pub commit_seq: u64,
     pub db: Arc<ClickDB>,
 }
 
 impl TransactionsData {
     pub fn new(chain_id: ChainId, is_backfill: bool, db: Arc<ClickDB>) -> Self {
-        let commit_every_block = env::var("COMMIT_EVERY_BLOCK")
-            .map(|v| v == "true")
-            .unwrap_or(false);
+        if env::var("COMMIT_EVERY_BLOCK").is_ok() {
+            tracing::log::warn!(
+                target: CLICKHOUSE_TARGET,
+                "COMMIT_EVERY_BLOCK is set but no longer used: commits now happen once per \
+                 bundle of blocks, which is at least as often. It can be removed from the env."
+            );
+        }
         let tx_cache = TxCache::new();
 
         let max_commit_handlers = env::var("MAX_COMMIT_HANDLERS")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(MAX_COMMIT_HANDLERS);
+            .unwrap_or(MAX_COMMIT_HANDLERS)
+            .max(1);
         let commit_semaphore = Arc::new(Semaphore::new(max_commit_handlers));
 
         Self {
             chain_id,
-            commit_every_block,
             is_backfill,
+            log_each_block: true,
             tx_cache,
             rows: TxRows::default(),
-            commit_handlers: vec![],
+            commit_handlers: VecDeque::new(),
             commit_semaphore,
+            prev_commit_done: None,
+            commit_seq: 0,
             db,
         }
     }
@@ -408,10 +499,14 @@ impl TransactionsData {
         block_row.num_transactions = tx_index;
         block_row.num_receipts = receipt_index;
 
-        tracing::log::info!(target: PROJECT_ID, "#{}: [{}] {} transactions to commit. Pending {}",
-            block_height,
-            if catching_up { "Catching up" } else { "Live" },
-            transactions_to_commit.len(), self.tx_cache.stats());
+        let mode = if catching_up { "Catching up" } else { "Live" };
+        if self.log_each_block {
+            tracing::log::info!(target: PROJECT_ID, "#{}: [{}] {} transactions to commit. Pending {}",
+                block_height, mode, transactions_to_commit.len(), self.tx_cache.stats());
+        } else {
+            tracing::log::debug!(target: PROJECT_ID, "#{}: [{}] {} transactions to commit. Pending {}",
+                block_height, mode, transactions_to_commit.len(), self.tx_cache.stats());
+        }
 
         if !catching_up {
             self.rows.receipt_txs.extend(pending_receipt_txs);
@@ -428,8 +523,6 @@ impl TransactionsData {
                     self.tx_cache.insert_transaction(transaction, &[]);
                 }
             }
-
-            self.maybe_commit(block_height).await?;
         }
 
         Ok(block_hash)
@@ -558,7 +651,7 @@ impl TransactionsData {
         }
 
         if transaction.committed_tx_row.as_ref() != Some(&tx_row) {
-            self.rows.tx_rows.push(tx_row.clone());
+            self.rows.push_tx_row(tx_row.clone());
             transaction.committed_tx_row = Some(tx_row);
         }
 
@@ -583,117 +676,300 @@ impl TransactionsData {
                 .get(&row.account_id)
                 != Some(row)
             {
-                self.rows.account_txs.push(row.clone());
+                self.rows.push_account_tx(row.clone());
             }
         }
         mem::swap(&mut accounts, &mut transaction.committed_account_tx_rows);
 
-        let encoded_tx = serde_json::to_vec(&transaction.transaction).unwrap();
-
-        self.rows.raw_tx_rows.push(RawTransactionRow {
-            transaction_hash: transaction.transaction_hash().to_string(),
-            tx_block_timestamp: transaction.tx_block_timestamp,
-            last_block_height: transaction.last_block_height,
-            data: zstd::encode_all(&encoded_tx[..], 3).expect("zstd encode error"),
-        });
+        // Serialize here (cheap), compress in the commit task (expensive): within a
+        // bundle the same transaction is re-emitted on every block it is touched and only
+        // the last version survives, so compressing now would throw the work away.
+        self.rows.push_raw_tx(
+            transaction.transaction_hash().to_string(),
+            PendingRawTx {
+                tx_block_timestamp: transaction.tx_block_timestamp,
+                last_block_height: transaction.last_block_height,
+                json: serde_json::to_vec(&transaction.transaction).unwrap(),
+            },
+        );
     }
 
-    pub async fn maybe_commit(&mut self, block_height: BlockHeight) -> anyhow::Result<()> {
-        let is_round_block = block_height % SAVE_STEP == 0;
-        if is_round_block {
-            tracing::log::info!(
-                target: CLICKHOUSE_TARGET,
-                "#{}: Having {} tx_rows, {} account_txs, {} receipts_txs, {} blocks, {} transactions, {} actions, {} events",
-                block_height,
-                self.rows.tx_rows.len(),
-                self.rows.account_txs.len(),
-                self.rows.receipt_txs.len(),
-                self.rows.blocks.len(),
-                self.rows.raw_tx_rows.len(),
-                self.rows.actions.len(),
-                self.rows.events.len(),
-            );
+    /// Awaits and removes every commit that has already finished, propagating the first
+    /// failure.
+    ///
+    /// Deliberately not "drain the finished prefix": one slow or wedged commit at the
+    /// head must not stop everything behind it from being reaped.
+    async fn reap_finished_commits(&mut self) -> anyhow::Result<()> {
+        let mut i = 0;
+        while i < self.commit_handlers.len() {
+            if self.commit_handlers[i].handle.is_finished() {
+                let CommitHandler { seq, handle } =
+                    self.commit_handlers.remove(i).expect("index is in range");
+                handle
+                    .await
+                    .map_err(|err| anyhow::anyhow!("commit #{} panicked: {}", seq, err))??;
+            } else {
+                i += 1;
+            }
         }
-        if self.rows.tx_rows.len() >= self.db.min_batch || is_round_block || self.commit_every_block
-        {
-            self.commit().await?;
-        }
-
         Ok(())
     }
 
     pub async fn commit(&mut self) -> anyhow::Result<()> {
-        let mut rows = TxRows::default();
-        std::mem::swap(&mut rows, &mut self.rows);
-        tracing::log::info!(
-            target: CLICKHOUSE_TARGET,
-            "Preparing to commit. {} handlers in progress",
-            self.commit_handlers.len()
-        );
-        while let Some(first) = self.commit_handlers.first() {
-            if first.is_finished() {
-                self.commit_handlers.remove(0).await??;
-            } else {
-                break;
-            }
+        if self.rows.is_empty() {
+            return Ok(());
         }
+        let mut rows = TxRows::default();
+        mem::swap(&mut rows, &mut self.rows);
+
+        self.reap_finished_commits().await?;
+
+        // The permit is acquired here, on the block-processing task, and therefore always
+        // in sequence order. That is what makes the ordering chain below deadlock-free:
+        // commit k always holds its permit before commit k+1 acquires one, so the
+        // predecessor a commit parks on is either already finished or actively running.
+        // Moving this acquire inside the spawned task would break that.
         let permit = self.commit_semaphore.clone().acquire_owned().await?;
+
+        let (done_tx, done_rx) = oneshot::channel::<()>();
+        let prev_done = self.prev_commit_done.replace(done_rx);
+        let seq = self.commit_seq;
+        self.commit_seq += 1;
+
         let db = self.db.clone();
-        let handler = tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
+            let start = std::time::Instant::now();
             let _permit = permit;
 
-            let start = std::time::Instant::now();
+            let blocks = mem::take(&mut rows.blocks);
+            let num_receipt_txs = rows.receipt_txs.len();
+            let num_actions = rows.actions.len();
+            let num_events = rows.events.len();
+            let tx_rows = mem::take(&mut rows.tx_rows);
+            let account_txs = mem::take(&mut rows.account_txs);
+            let raw_txs = mem::take(&mut rows.raw_txs);
+
+            // zstd is the one genuinely CPU-bound step, so it runs on a blocking thread.
+            // Sorting by each table's ClickHouse ORDER BY keeps the resulting parts compact.
+            let (raw_tx_rows, tx_rows, account_txs) = tokio::task::spawn_blocking(move || {
+                let mut raw_tx_rows: Vec<RawTransactionRow> = raw_txs
+                    .into_iter()
+                    .map(|(transaction_hash, raw)| RawTransactionRow {
+                        transaction_hash,
+                        tx_block_timestamp: raw.tx_block_timestamp,
+                        last_block_height: raw.last_block_height,
+                        data: zstd::encode_all(&raw.json[..], 3).expect("zstd encode error"),
+                    })
+                    .collect();
+                raw_tx_rows.sort_unstable_by(|a, b| a.transaction_hash.cmp(&b.transaction_hash));
+
+                let mut tx_rows: Vec<TransactionRow> = tx_rows.into_values().collect();
+                tx_rows.sort_unstable_by_key(|row| (row.tx_block_height, row.tx_index));
+
+                let mut account_txs: Vec<AccountTxRow> = account_txs.into_values().collect();
+                account_txs.sort_unstable_by(|a, b| {
+                    (&a.account_id, a.tx_block_height, a.tx_index).cmp(&(
+                        &b.account_id,
+                        b.tx_block_height,
+                        b.tx_index,
+                    ))
+                });
+
+                (raw_tx_rows, tx_rows, account_txs)
+            })
+            .await?;
+
             try_join!(
-                insert_rows_with_retry(&db.client, &rows.raw_tx_rows, "raw_tx"),
-                insert_rows_with_retry(&db.client, &rows.tx_rows, "transactions"),
-                insert_rows_with_retry(&db.client, &rows.account_txs, "account_txs"),
-                insert_rows_with_retry(&db.client, &rows.receipt_txs, "receipt_txs"),
-                insert_rows_with_retry(&db.client, &rows.actions, "actions"),
-                insert_rows_with_retry(&db.client, &rows.events, "events"),
+                insert_rows_with_retry(&db, &raw_tx_rows, "raw_tx"),
+                insert_rows_with_retry(&db, &tx_rows, "transactions"),
+                insert_rows_with_retry(&db, &account_txs, "account_txs"),
+                insert_rows_with_retry(&db, &rows.receipt_txs, "receipt_txs"),
+                insert_rows_with_retry(&db, &rows.actions, "actions"),
+                insert_rows_with_retry(&db, &rows.events, "events"),
             )?;
-            insert_rows_with_retry(&db.client, &rows.blocks, "blocks").await?;
+            let data_duration = start.elapsed().as_millis();
+
+            let num_raw_tx_rows = raw_tx_rows.len();
+            let num_tx_rows = tx_rows.len();
+            let num_account_txs = account_txs.len();
+            // Everything but the watermark rows is durable now, so don't keep a whole
+            // bundle pinned in memory while parked on the predecessor.
+            drop((raw_tx_rows, tx_rows, account_txs, rows));
+
+            // `blocks` is the restart watermark, so it must never become visible before
+            // the data of an earlier bundle. A dropped sender means an earlier commit
+            // failed or panicked, and that poisons every commit after it.
+            if let Some(prev_done) = prev_done {
+                prev_done.await.map_err(|_| {
+                    anyhow::anyhow!("commit #{}: an earlier commit did not complete", seq)
+                })?;
+            }
+            insert_rows_with_retry(&db, &blocks, "blocks").await?;
+            let _ = done_tx.send(());
+
             let duration = start.elapsed().as_millis();
+            let now_ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos() as u64;
+            let freshness = blocks
+                .last()
+                .map(|block| now_ns.saturating_sub(block.block_timestamp) as f64 / 1e9f64)
+                .unwrap_or_default();
             tracing::log::info!(
                 target: CLICKHOUSE_TARGET,
-                "({} ms) Committed {} raw_tx_rows, {} tx_rows, {} account_txs, {} receipts_txs, {} blocks, {} actions, {} events",
+                "({} ms; data {} ms) Committed #{}..{} ({} blocks) freshness {:.3} sec | {} raw_tx_rows, {} tx_rows, {} account_txs, {} receipts_txs, {} actions, {} events",
                 duration,
-                rows.raw_tx_rows.len(),
-                rows.tx_rows.len(),
-                rows.account_txs.len(),
-                rows.receipt_txs.len(),
-                rows.blocks.len(),
-                rows.actions.len(),
-                rows.events.len(),
+                data_duration,
+                blocks.first().map(|block| block.block_height).unwrap_or_default(),
+                blocks.last().map(|block| block.block_height).unwrap_or_default(),
+                blocks.len(),
+                freshness,
+                num_raw_tx_rows,
+                num_tx_rows,
+                num_account_txs,
+                num_receipt_txs,
+                num_actions,
+                num_events,
             );
             Ok::<(), anyhow::Error>(())
         });
-        self.commit_handlers.push(handler);
+        self.commit_handlers.push_back(CommitHandler { seq, handle });
 
         Ok(())
     }
 
+    /// The height to resume from: the highest block whose bundle is known to be fully
+    /// stored.
+    ///
+    /// `max(block_height)` on its own is not safe. `blocks` is a `Distributed` table
+    /// sharded by `cityHash64(block_height)`, so one commit's rows fan out across shards
+    /// and the insert is not atomic: a commit that exhausts its retries can leave rows on
+    /// some shards and not others. `max()` would then report a height above genuinely
+    /// missing lower blocks, and because everything at or below the resume point is
+    /// replayed without writing anything, the hole would be permanent.
+    ///
+    /// So walk the `prev_block_height` chain down from `max()` and stop at the first
+    /// break. Only the newest bundle can be partial -- commits are ordered and a failed
+    /// one poisons all its successors, so nothing below the previous commit's range can
+    /// be affected -- and the window checked here is several bundles deep.
     pub async fn last_block_in_range(
         &self,
         db: &ClickDB,
         start_block: BlockHeight,
         end_block: BlockHeight,
-    ) -> BlockHeight {
-        let res = db
+        max_blocks_per_commit: usize,
+    ) -> anyhow::Result<BlockHeight> {
+        // A query error must not be swallowed into 0 here: that would make the indexer
+        // treat the whole range as un-indexed and re-index it from scratch in live mode.
+        let max_block = db
             .max_in_range("block_height", "blocks", start_block, end_block)
-            .await
-            .unwrap_or(0);
-        if res == 0 {
-            start_block.saturating_sub(1)
-        } else {
-            res
+            .await?;
+        if max_block == 0 {
+            return Ok(start_block.saturating_sub(1));
         }
+
+        let window = (4 * max_blocks_per_commit as u64).max(SAFE_CATCH_UP_OFFSET);
+        let window_start = max_block.saturating_sub(window).max(start_block);
+        let chain = db.fetch_block_chain(window_start, max_block).await?;
+
+        let last_contiguous = last_contiguous_block(&chain, max_block);
+        if last_contiguous != max_block {
+            tracing::log::warn!(
+                target: PROJECT_ID,
+                "Blocks table has a hole above #{}: max is #{}, but the chain breaks first. \
+                 Resuming from #{} and re-indexing the rest.",
+                last_contiguous, max_block, last_contiguous
+            );
+        }
+        Ok(last_contiguous)
     }
 
+    /// Awaits every in-flight commit in order, so the first (lowest sequence) real
+    /// failure is the one reported, rather than a successor's "an earlier commit did not
+    /// complete".
     pub async fn flush(&mut self) -> anyhow::Result<()> {
-        while let Some(handler) = self.commit_handlers.pop() {
-            handler.await??;
+        let mut first_error = None;
+        while let Some(CommitHandler { seq, handle }) = self.commit_handlers.pop_front() {
+            let result = handle
+                .await
+                .map_err(|err| anyhow::anyhow!("commit #{} panicked: {}", seq, err))
+                .and_then(|res| res);
+            if let Err(err) = result {
+                tracing::log::error!(target: CLICKHOUSE_TARGET, "Commit #{} failed: {:#}", seq, err);
+                first_error.get_or_insert(err);
+            }
         }
-        Ok(())
+        self.prev_commit_done = None;
+        match first_error {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
+    }
+}
+
+/// The highest height reachable from the bottom of `chain` without a break in the
+/// `prev_block_height` links, or `max_block` if there is none.
+///
+/// `chain` must be ascending by `block_height`. Heights are not consecutive -- the chain
+/// legitimately skips heights with no block -- so only `prev_block_height` distinguishes
+/// a missing row from a skipped height.
+fn last_contiguous_block(chain: &[BlockChainRow], max_block: BlockHeight) -> BlockHeight {
+    for pair in chain.windows(2) {
+        // A `None` predecessor can't be checked; treat it as unbroken.
+        if let Some(prev_block_height) = pair[1].prev_block_height {
+            if prev_block_height != pair[0].block_height {
+                return pair[0].block_height;
+            }
+        }
+    }
+    max_block
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn chain(pairs: &[(u64, Option<u64>)]) -> Vec<BlockChainRow> {
+        pairs
+            .iter()
+            .map(|(block_height, prev_block_height)| BlockChainRow {
+                block_height: *block_height,
+                prev_block_height: *prev_block_height,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn unbroken_chain_resumes_at_max() {
+        // Heights 11 and 13 were skipped on chain, which is not a hole.
+        let chain = chain(&[(10, Some(9)), (12, Some(10)), (14, Some(12))]);
+        assert_eq!(last_contiguous_block(&chain, 14), 14);
+    }
+
+    #[test]
+    fn stops_before_a_missing_block() {
+        // #12 is missing: #14 says its predecessor was #12, but #12 isn't stored.
+        let chain = chain(&[(10, Some(9)), (11, Some(10)), (14, Some(12))]);
+        assert_eq!(last_contiguous_block(&chain, 14), 11);
+    }
+
+    #[test]
+    fn stops_at_the_first_break_not_the_last() {
+        let chain = chain(&[(10, Some(9)), (14, Some(12)), (20, Some(18))]);
+        assert_eq!(last_contiguous_block(&chain, 20), 10);
+    }
+
+    #[test]
+    fn unverifiable_link_is_treated_as_unbroken() {
+        let chain = chain(&[(10, Some(9)), (11, None), (12, Some(11))]);
+        assert_eq!(last_contiguous_block(&chain, 12), 12);
+    }
+
+    #[test]
+    fn too_short_to_verify_falls_back_to_max() {
+        assert_eq!(last_contiguous_block(&[], 42), 42);
+        assert_eq!(last_contiguous_block(&chain(&[(42, Some(41))]), 42), 42);
     }
 }
 
