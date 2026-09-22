@@ -1,6 +1,6 @@
 [package]
 name = "clickhouse-provider"
-version = "2.13.0"
+version = "2.14.0-rc.2"
 authors = ["Eugene The Dream"]
 rust-version = "1.91.0"
 edition = "2021"
