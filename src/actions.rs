@@ -349,6 +349,7 @@ pub fn extract_rows(
                         ActionView::DeterministicStateInit { deposit, .. } => Some(*deposit),
                         ActionView::TransferToGasKey { deposit, .. } => Some(*deposit),
                         ActionView::WithdrawFromGasKey { amount, .. } => Some(*amount),
+                        ActionView::UniversalStateInit { deposit, .. } => Some(*deposit),
                         _ => None,
                     }
                     .map(|d| d.as_yoctonear()),
@@ -494,6 +495,7 @@ fn action_type(action: &ActionView) -> String {
         ActionView::TransferToGasKey { .. } => "TransferToGasKey",
         ActionView::WithdrawFromGasKey { .. } => "WithdrawFromGasKey",
         ActionView::DelegateV2 { .. } => "DelegateV2",
+        ActionView::UniversalStateInit { .. } => "UniversalStateInit",
     }
     .to_string()
 }
