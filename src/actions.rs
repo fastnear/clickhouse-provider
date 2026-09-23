@@ -335,7 +335,8 @@ pub fn extract_rows(
                     },
                     access_key_contract_id: match &action {
                         ActionView::AddKey { access_key, .. } => match &access_key.permission {
-                            AccessKeyPermissionView::FunctionCall { receiver_id, .. } => {
+                            AccessKeyPermissionView::FunctionCall { receiver_id, .. }
+                            | AccessKeyPermissionView::GasKeyFunctionCall { receiver_id, .. } => {
                                 Some(receiver_id.to_string())
                             }
                             _ => None,
