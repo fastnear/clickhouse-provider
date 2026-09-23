@@ -343,6 +343,22 @@ pub fn extract_rows(
                         },
                         _ => None,
                     },
+                    // The variant name as near-primitives spells it. Exhaustive on purpose:
+                    // a new variant should fail to compile here, not land as NULL.
+                    access_key_permission: match &action {
+                        ActionView::AddKey { access_key, .. } => Some(
+                            match &access_key.permission {
+                                AccessKeyPermissionView::FullAccess => "FullAccess",
+                                AccessKeyPermissionView::FunctionCall { .. } => "FunctionCall",
+                                AccessKeyPermissionView::GasKeyFullAccess { .. } => "GasKeyFullAccess",
+                                AccessKeyPermissionView::GasKeyFunctionCall { .. } => {
+                                    "GasKeyFunctionCall"
+                                }
+                            }
+                            .to_string(),
+                        ),
+                        _ => None,
+                    },
                     deposit: match &action {
                         ActionView::Transfer { deposit, .. } => Some(*deposit),
                         ActionView::Stake { stake, .. } => Some(*stake),
