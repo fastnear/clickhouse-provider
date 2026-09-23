@@ -213,6 +213,7 @@ CREATE TABLE local_actions ON CLUSTER '{cluster}'
     contract_hash          Nullable(String) COMMENT 'The hash of the contract if the action is DeployContract, DeployGlobalContract, DeployGlobalContractByAccountId, UseGlobalContract',
     public_key             Nullable(String) COMMENT 'The public key used in the action if the action is AddKey or DeleteKey',
     access_key_contract_id Nullable(String) COMMENT 'The contract ID of the limited access key if the action is AddKey and not a full access key',
+    access_key_permission  LowCardinality(Nullable(String)) COMMENT 'The permission variant if the action is AddKey: FullAccess, FunctionCall, GasKeyFullAccess or GasKeyFunctionCall',
     deposit                Nullable(UInt128) COMMENT 'The amount of attached deposit in yoctoNEAR if the action is FunctionCall, Stake or Transfer',
     gas_price              UInt128 COMMENT 'The gas price in yoctoNEAR for the receipt',
     attached_gas           Nullable(UInt64) COMMENT 'The amount of attached gas if the action is FunctionCall',
