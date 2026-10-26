@@ -1,7 +1,7 @@
-use clickhouse::{Client, Row};
+use clickhouse::{Client, Row, RowOwned, RowWrite};
 use std::env;
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use fastnear_primitives::near_primitives::types::BlockHeight;
 use std::time::Duration;
@@ -131,14 +131,18 @@ fn establish_connection() -> Client {
         .with_url(env::var("DATABASE_URL").unwrap())
         .with_user(env::var("DATABASE_USER").unwrap())
         .with_password(env::var("DATABASE_PASSWORD").unwrap())
-        .with_database(env::var("DATABASE_DATABASE").unwrap());
+        .with_database(env::var("DATABASE_DATABASE").unwrap())
+        // Since 0.14 the client validates rows against the table schema by default, and
+        // that rejects our `u64` nanosecond timestamps for `DateTime64(9, 'UTC')` columns.
+        // Both encode as the same 8 bytes in `RowBinary`, so skip the check.
+        .with_validation(false);
     // All the tables we write to are `Distributed`. By default an INSERT into a
     // `Distributed` table is acknowledged as soon as the coordinator has written its
     // temporary files, *not* once the shards actually hold the rows. The ordered
     // watermark in `TransactionsData::commit` relies on an acknowledged `blocks` INSERT
     // being durable, so ask for a foreground insert instead.
     if env_flag("CLICKHOUSE_DISTRIBUTED_SYNC", true) {
-        client = client.with_option("insert_distributed_sync", "1");
+        client = client.with_setting("insert_distributed_sync", "1");
     }
     client
 }
@@ -149,7 +153,7 @@ pub async fn insert_rows_with_retry<T>(
     table: &str,
 ) -> clickhouse::error::Result<()>
 where
-    T: Row + Serialize,
+    T: RowOwned + RowWrite,
 {
     if rows.is_empty() || db.skip_commit {
         return Ok(());
@@ -165,7 +169,8 @@ where
             // connection wedges the commit task (and its semaphore permit) forever.
             let mut insert = db
                 .client
-                .insert(table)?
+                .insert::<T>(table)
+                .await?
                 .with_timeouts(Some(db.send_timeout), Some(db.end_timeout));
             for row in rows {
                 insert.write(row).await?;
